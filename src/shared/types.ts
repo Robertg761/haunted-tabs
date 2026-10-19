@@ -54,7 +54,7 @@ export interface TabRecord {
   /** Cobweb growth is running in the current page. */
   cobwebsArmed?: boolean;
   /** A return visit to replay once a tab the browser unloaded has reloaded. */
-  pendingReturn?: { stage: Stage; idle: number; at: number };
+  pendingReturn?: { stage: Stage; idle: number; at: number; url?: string };
   /** The visit that just played, in case the page reloads straight after. */
   lastReturn?: { stage: Stage; idle: number; at: number };
   seed: number;

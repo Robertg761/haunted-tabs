@@ -82,6 +82,7 @@ export class Cobwebs {
 
   /** Lay `count` webs over the page, already spun, as if they grew while you were away. */
   add(count: number, weave = false): void {
+    if (count <= 0) return;
     const want = Math.min(MAX_WEBS, this.liveWebs.size + count);
     while (this.liveWebs.size < want) {
       const slot = this.freeSlot();
@@ -117,9 +118,9 @@ export class Cobwebs {
     if (this.growTimer !== undefined) clearInterval(this.growTimer);
     this.growTimer = undefined;
     // Hidden pages get no animation frames, so make sure the webs go even then.
-    if (document.visibilityState === 'visible') this.fadeAll();
+    if (document.visibilityState === 'visible' && this.particles.length) this.fadeAll();
     else this.teardown();
-    setTimeout(() => this.particles.length && this.teardown(), 2500);
+    setTimeout(() => (this.particles.length || this.host) && this.teardown(), 2500);
   }
 
   // --- building --------------------------------------------------------------

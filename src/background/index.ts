@@ -173,12 +173,14 @@ async function send<T>(tabId: number, cmd: PageCommand, inject: boolean): Promis
 }
 
 /**
- * Ask a page to drop our paint (and its cobwebs, with `sweep`). 'frozen' means
- * the page exists but could not answer yet, so the caller must try again later.
- * A page with nobody listening has nothing of ours left to clean.
+ * Ask a page to drop our paint (`restore`) and/or its cobwebs (`sweep`).
+ * 'frozen' means the page exists but could not answer yet, so the caller must
+ * try again later. A page with nobody listening has nothing of ours to clean.
  */
-async function tryClean(tabId: number, sweep: boolean): Promise<'done' | 'frozen'> {
-  const cmds: PageCommand[] = sweep ? [{ type: 'haunt:restore' }, { type: 'haunt:sweep' }] : [{ type: 'haunt:restore' }];
+async function tryClean(tabId: number, what: { restore?: boolean; sweep?: boolean }): Promise<'done' | 'frozen'> {
+  const cmds: PageCommand[] = [];
+  if (what.restore) cmds.push({ type: 'haunt:restore' });
+  if (what.sweep) cmds.push({ type: 'haunt:sweep' });
   for (const cmd of cmds) {
     try {
       await withTimeout(ext.tabs.sendMessage(tabId, cmd));
@@ -194,8 +196,9 @@ function isAsleep(tab: chrome.tabs.Tab): boolean {
   return !!tab.discarded || !!(tab as chrome.tabs.Tab & { frozen?: boolean }).frozen;
 }
 
-async function restoreTab(tabId: number, rec: TabRecord | undefined): Promise<void> {
-  const result = await tryClean(tabId, false);
+/** Give a tab its real face back, and with `sweep` take its cobwebs too. */
+async function restoreTab(tabId: number, rec: TabRecord | undefined, sweep = false): Promise<void> {
+  const result = await tryClean(tabId, { restore: true, sweep });
   if (!rec) return;
   if (result === 'frozen') {
     rec.needsExorcise = true; // still wearing our paint; tick retries
@@ -204,6 +207,7 @@ async function restoreTab(tabId: number, rec: TabRecord | undefined): Promise<vo
   rec.applied = Stage.Alive;
   rec.appliedTitle = undefined;
   rec.needsExorcise = false;
+  if (sweep) rec.cobwebsArmed = false;
 }
 
 /** Paint a tab to match its stage of decay. */
@@ -352,7 +356,7 @@ async function tick(): Promise<void> {
       tabs.map(async (tab) => {
         const rec = state.records[tab.id!];
         if (!rec?.needsExorcise || isAsleep(tab)) return;
-        if ((await tryClean(tab.id!, true)) === 'frozen') return;
+        if ((await tryClean(tab.id!, { restore: true, sweep: true })) === 'frozen') return;
         rec.applied = Stage.Alive;
         rec.appliedTitle = undefined;
         rec.cobwebsArmed = false;
@@ -459,7 +463,7 @@ async function wake(tabId: number, windowId: number): Promise<void> {
         rec.needsExorcise = !settings.enabled || rec.needsExorcise;
         if (rec.needsExorcise) await ensureAlarm();
       }
-      if (stage !== Stage.Alive) rec.pendingReturn = { stage, idle, at: now };
+      if (stage !== Stage.Alive) rec.pendingReturn = { stage, idle, at: now, url: known?.url };
     }
   }
   await persist();
@@ -488,7 +492,7 @@ async function returnVisit(tab: chrome.tabs.Tab, rec: TabRecord, stage: Stage, i
     // Always ask: cheap when there is nothing to restore, and it catches paint
     // the records lost track of. Webs go too if they are no longer wanted.
     const webs = settings.enabled && settings.cobwebs;
-    delivered = (await tryClean(tabId, !webs && !!rec.cobwebsArmed)) === 'done';
+    delivered = (await tryClean(tabId, { restore: true, sweep: !webs && !!rec.cobwebsArmed })) === 'done';
     if (delivered && !webs) rec.cobwebsArmed = false;
   }
   if (!delivered) return false;
@@ -537,7 +541,7 @@ async function exorcise(): Promise<void> {
       if (tab.discarded) {
         // A sleeping tab still shows its ghostly title; waking it loads the real page.
         if (rec.applied !== Stage.Alive) await ext.tabs.reload(tab.id).catch(() => {});
-      } else if ((await tryClean(tab.id, true)) === 'frozen') {
+      } else if ((await tryClean(tab.id, { restore: true, sweep: true })) === 'frozen') {
         // Frozen pages cannot answer yet. Keep them marked; tick keeps asking.
         if (rec.applied !== Stage.Alive || rec.cobwebsArmed) rec.needsExorcise = true;
         return;
@@ -565,8 +569,13 @@ async function setSettings(patch: Partial<Settings>): Promise<void> {
   await saveSettings(settings);
   if (patch.cobwebs === false) {
     const tabs = await ext.tabs.query({});
-    await Promise.all(tabs.map((t) => send(t.id!, { type: 'haunt:sweep' }, false)));
-    for (const rec of Object.values(state.records)) rec.cobwebsArmed = false;
+    await Promise.all(
+      tabs.map(async (t) => {
+        const rec = state.records[t.id!];
+        // A frozen page keeps its mark, so returning to it sweeps the webs then.
+        if ((await tryClean(t.id!, { sweep: true })) === 'done' && rec) rec.cobwebsArmed = false;
+      }),
+    );
   }
   await ensureAlarm();
   await tick();
@@ -709,7 +718,7 @@ ext.tabs.onUpdated.addListener((tabId, info, tab) => {
       // reloads it, wiping a visit that has only just played. Play it again.
       const last = rec.lastReturn;
       if (tab.active && last && !rec.pendingReturn && Date.now() - last.at < 5000) {
-        rec.pendingReturn = { ...last, at: Date.now() };
+        rec.pendingReturn = { ...last, at: Date.now(), url: rec.url };
         rec.lastReturn = undefined;
       }
     }
@@ -718,13 +727,15 @@ ext.tabs.onUpdated.addListener((tabId, info, tab) => {
       return;
     }
     if (info.audible || info.pinned) {
-      // Never haunt a tab that is playing sound or has been pinned.
-      await restoreTab(tabId, rec);
+      // Never haunt a tab that is playing sound or has been pinned: no paint, no webs.
+      await restoreTab(tabId, rec, true);
     } else if (info.status === 'complete' && rec.pendingReturn && tab.active) {
       // A tab the browser had unloaded has finished reloading: now it can greet you.
-      const { stage, idle, at } = rec.pendingReturn;
-      // Keep it queued if nobody answered; the next load gets another try.
-      if (Date.now() - at > RETURN_TTL || (await returnVisit(tab, rec, stage, idle))) rec.pendingReturn = undefined;
+      const { stage, idle, at, url } = rec.pendingReturn;
+      // The visit belongs to the page it was queued for. Navigated elsewhere? Drop it.
+      // Otherwise keep it queued if nobody answered; the next load gets another try.
+      const stale = Date.now() - at > RETURN_TTL || (url !== undefined && tab.url !== url);
+      if (stale || (await returnVisit(tab, rec, stage, idle))) rec.pendingReturn = undefined;
     } else if (info.status === 'complete' && !tab.active) {
       // A background page (re)loaded without our paint. Put back what it has earned.
       await paint(tab, rec, stageOf(tab, rec, Date.now()), Date.now());

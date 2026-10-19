@@ -185,6 +185,17 @@ try {
   }
   const swept = await eventually(async () => (await webs()) < 4, 4000);
   check(swept, `sweeping the mouse tears cobwebs away (${await webs()} left)`);
+  // Pinned and audible tabs must never be touched: pinning one clears its webs.
+  const alphaId = await sw.evaluate(async (url) => (await chrome.tabs.query({ url }))[0].id, `${origin}/alpha`);
+  const websBefore = await webs();
+  await sw.evaluate((id) => chrome.tabs.sendMessage(id, { type: 'haunt:cobwebs', webs: 3, growAfterMs: 60_000 }), alphaId);
+  check((await webs()) === websBefore + 3, 'webs can be laid on a tab');
+  await sw.evaluate((id) => chrome.tabs.update(id, { pinned: true }), alphaId);
+  check(
+    await eventually(() => alpha.evaluate(() => !document.querySelector('[data-haunted-tabs="cobwebs"]')), 4000),
+    'pinning a tab clears its cobwebs',
+  );
+  await sw.evaluate((id) => chrome.tabs.update(id, { pinned: false }), alphaId);
 
   // Manual close from the popup also lands in the Graveyard.
   const tickerId = await sw.evaluate(async (url) => (await chrome.tabs.query({ url }))[0].id, `${origin}/ticker`);
