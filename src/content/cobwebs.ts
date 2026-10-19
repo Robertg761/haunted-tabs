@@ -512,7 +512,8 @@ export class Cobwebs {
     const left = new Map<Web, number>();
     for (const s of this.strands) left.set(s.web, (left.get(s.web) ?? 0) + 1);
     for (const p of this.particles) {
-      if (p.falling || !p.active || this.weaving(p.web, now)) continue;
+      // Inactive points in a finished web have had every thread cut: orphans fall too.
+      if (p.falling || this.weaving(p.web, now)) continue;
       const torn = (left.get(p.web) ?? 0) < p.web.total * 0.6;
       if (torn) p.pin = undefined; // too damaged to hold: the whole web lets go
       if (torn || !anchored.has(find(p))) p.falling = true;
