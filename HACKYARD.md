@@ -4,7 +4,7 @@ This repo is a solo entry for [Hackyard Yard #5](https://hackyard.tech/yards/yar
 
 ## Key dates (UTC)
 
-| Milestone | UTC | Newfoundland time (NDT) |
+| Milestone | UTC | UTC-2:30 |
 | --- | --- | --- |
 | Kickoff | Mon Oct 19, 18:00 | Mon Oct 19, 3:30 PM |
 | Late joins close | Wed Oct 21, 18:00 | Wed Oct 21, 3:30 PM |
