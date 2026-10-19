@@ -1,0 +1,31 @@
+{
+  "name": "haunted-tabs",
+  "version": "0.1.0",
+  "description": "A haunted tab manager browser extension. It manages your real tabs, and neglected ones come back as ghosts.",
+  "scripts": {
+    "build": "vite build && vite build -c vite.content.config.ts",
+    "typecheck": "tsc",
+    "test": "vitest run",
+    "e2e": "npm run build && node tests/e2e.mjs",
+    "icons": "node scripts/make-icons.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Robertg761/haunted-tabs.git"
+  },
+  "author": "Robertg761",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/Robertg761/haunted-tabs/issues"
+  },
+  "homepage": "https://github.com/Robertg761/haunted-tabs#readme",
+  "devDependencies": {
+    "@types/chrome": "^0.3.5",
+    "playwright-core": "1.56",
+    "typescript": "^5.9.3",
+    "vite": "^5.4.21",
+    "vitest": "^2.1.9"
+  },
+  "private": true,
+  "type": "module"
+}

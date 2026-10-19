@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>The Graveyard</title>
+    <link rel="icon" href="../icons/icon32.png" />
+    <link rel="stylesheet" href="./graveyard.css" />
+  </head>
+  <body>
+    <div class="fog" aria-hidden="true"></div>
+    <header class="head">
+      <div>
+        <h1>🪦 The Graveyard</h1>
+        <p id="summary" class="summary">Every tab the haunting took lies here. Nothing is ever lost.</p>
+      </div>
+      <div class="controls">
+        <input type="search" id="search" placeholder="Search the graves…" aria-label="Search the graves" autocomplete="off" />
+        <button id="resurrect-all" class="btn raise">✨ Resurrect all</button>
+      </div>
+    </header>
+    <main id="graves" class="graves" aria-live="polite"></main>
+    <footer class="ground" aria-hidden="true"></footer>
+    <script type="module" src="./graveyard.ts"></script>
+  </body>
+</html>

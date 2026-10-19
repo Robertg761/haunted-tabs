@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "Haunted Tabs",
+  "version": "0.1.0",
+  "description": "A tab manager that is haunted. Tabs you neglect slowly decay into ghosts, skulls, and graves. Opt-in and fully reversible.",
+  "minimum_chrome_version": "116",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_title": "Haunted Tabs",
+    "default_popup": "popup/index.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png"
+    }
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "permissions": ["tabs", "storage", "alarms", "scripting", "favicon"],
+  "optional_permissions": ["notifications"],
+  "optional_host_permissions": ["<all_urls>"]
+}
