@@ -49,6 +49,8 @@ export interface TabRecord {
   realFavIconUrl?: string;
   /** Set when we discarded the tab after checking it had no unsaved input. */
   safeDiscarded?: boolean;
+  /** Still painted after an Exorcise because the page was frozen; retried until it answers. */
+  needsExorcise?: boolean;
   /** Cobweb growth is running in the current page. */
   cobwebsArmed?: boolean;
   /** A return visit to replay once a tab the browser unloaded has reloaded. */
