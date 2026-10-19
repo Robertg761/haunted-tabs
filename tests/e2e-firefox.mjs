@@ -193,13 +193,28 @@ try {
   check(await eventually(async () => (await form.title()) === 'Form page'), 'exorcise restores real titles');
   check((await form.evaluate(() => document.querySelector('#name').value)) === 'half-written message', 'unsaved input is untouched');
 
-  // Discard last: the page goes away, which WebDriver may not enjoy.
-  await advance(120 * MIN);
+  // Memory saving: the browser unloads a neglected tab. When you come back it
+  // reloads from scratch, and the haunting has to greet you anyway.
   await ask({ type: 'setSettings', settings: { enabled: true } });
+  await advance(150 * MIN);
+  await tick();
   const plainId = await inExt(async (url) => (await browser.tabs.query({})).find((t) => t.url === url).id, `${origin}/plain`);
   const slept = await ask({ type: 'discard', tabId: plainId });
   const sleptTab = await inExt(async (id) => browser.tabs.get(id), plainId);
   check(slept.ok && sleptTab.discarded, 'a safe ghost tab can be discarded');
+  await inExt((id) => browser.tabs.update(id, { active: true }), plainId);
+  const reloaded = await eventually(async () => {
+    for (const p of await browser.pages()) {
+      const href = await p.evaluate(() => location.href).catch(() => '');
+      if (href === `${origin}/plain`) return p;
+    }
+  }, 8000);
+  check(!!reloaded, 'the unloaded tab reloads when you return');
+  const possessed = reloaded && (await eventually(() => reloaded.evaluate(() => !!document.querySelector('[data-haunted-tabs="glitch"]')).catch(() => false), 8000));
+  check(possessed, 'possession still plays after the reload');
+  const webbed = reloaded && (await eventually(() => reloaded.evaluate(() => Number(document.querySelector('[data-haunted-tabs="cobwebs"]')?.dataset.webs ?? 0) > 0).catch(() => false), 8000));
+  check(webbed, 'cobwebs still appear after the reload');
+  check(reloaded && (await eventually(async () => (await reloaded.title()) === 'Plain page', 5000)), 'and the real title comes back');
 } catch (err) {
   console.error(err);
   failures++;

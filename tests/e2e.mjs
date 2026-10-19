@@ -168,6 +168,17 @@ try {
   check(restored, 'real title comes back after the possession');
   check(await alpha.evaluate(() => !!document.querySelector('link[href="/fav.svg"]') && !document.querySelector('link[data-haunted-tabs][rel=icon]')), 'real favicon restored');
   check(await alpha.evaluate(() => !document.querySelector('[data-haunted-tabs="glitch"]')), 'glitch overlay cleaned up');
+  const webs = () => alpha.evaluate(() => Number(document.querySelector('[data-haunted-tabs="cobwebs"]')?.dataset.webs ?? 0));
+  check((await webs()) >= 4, `a long-dead tab is full of cobwebs (${await webs()})`);
+  if (shots) await alpha.screenshot({ path: join(shots, 'cobwebs.png') });
+  for (let i = 0; i < 8; i++) {
+    await alpha.mouse.move(980, 620, { steps: 14 });
+    await alpha.mouse.move(20, 20, { steps: 14 });
+    await alpha.mouse.move(980, 20, { steps: 14 });
+    await alpha.mouse.move(20, 620, { steps: 14 });
+  }
+  const swept = await eventually(async () => (await webs()) < 4, 4000);
+  check(swept, `sweeping the mouse tears cobwebs away (${await webs()} left)`);
 
   // Manual close from the popup also lands in the Graveyard.
   const tickerId = await sw.evaluate(async (url) => (await chrome.tabs.query({ url }))[0].id, `${origin}/ticker`);
@@ -212,6 +223,10 @@ try {
   check(await eventually(async () => (await form.title()) === 'Form page'), 'exorcise restores real titles');
   check((await form.inputValue('#name')) === 'half-written message', 'unsaved input is untouched');
   check(await form.evaluate(() => !document.querySelector('link[data-haunted-tabs][rel=icon]')), 'exorcise restores favicons');
+  check(
+    await eventually(() => alpha.evaluate(() => !document.querySelector('[data-haunted-tabs="cobwebs"]')), 4000),
+    'exorcise sweeps away the cobwebs',
+  );
   const badge = await sw.evaluate(() => chrome.action.getBadgeText({}));
   check(badge === '', 'badge cleared');
 } catch (err) {

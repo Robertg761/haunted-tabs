@@ -39,8 +39,19 @@ interface SessionState {
   pendingPermission?: { settings: Partial<Settings>; at: number };
 }
 
+/**
+ * Pages we have painted, by URL, kept in storage.local. Session storage and tab
+ * ids do not survive a browser restart, but the browser may restore a tab still
+ * showing our ghost title without loading it. This lets us recognise it.
+ */
+type PaintedMap = Record<string, { real?: string; painted: string; icon?: string }>;
+const PAINTED_KEY = 'painted';
+const PAINTED_MAX = 1000;
+
 let settings: Settings;
 let state: SessionState = { records: {}, activeByWindow: {}, lastPoltergeist: 0 };
+let painted: PaintedMap = {};
+let paintedDirty = false;
 let loaded: Promise<void> | undefined;
 
 function load(): Promise<void> {
@@ -48,12 +59,31 @@ function load(): Promise<void> {
     settings = await loadSettings();
     const got = await ext.storage.session.get(SESSION_KEY);
     if (got[SESSION_KEY]) state = got[SESSION_KEY] as SessionState;
+    painted = ((await ext.storage.local.get(PAINTED_KEY))[PAINTED_KEY] as PaintedMap | undefined) ?? {};
   })();
   return loaded;
 }
 
-function persist(): Promise<void> {
-  return ext.storage.session.set({ [SESSION_KEY]: state });
+async function persist(): Promise<void> {
+  await ext.storage.session.set({ [SESSION_KEY]: state });
+  if (paintedDirty) {
+    paintedDirty = false;
+    await ext.storage.local.set({ [PAINTED_KEY]: painted });
+  }
+}
+
+function rememberPaint(url: string | undefined, entry: PaintedMap[string] | undefined): void {
+  if (!url) return;
+  if (entry) {
+    painted[url] = entry;
+    const keys = Object.keys(painted);
+    if (keys.length > PAINTED_MAX) delete painted[keys[0]];
+  } else if (painted[url]) {
+    delete painted[url];
+  } else {
+    return;
+  }
+  paintedDirty = true;
 }
 
 // Every event handler runs through this queue, so the service worker never
@@ -77,8 +107,17 @@ function recordFor(tab: chrome.tabs.Tab, now: number): TabRecord {
       applied: Stage.Alive,
       seed: Math.floor(Math.random() * 2 ** 31),
     };
+    const known = tab.url ? painted[tab.url] : undefined;
+    if (known && known.painted === tab.title) {
+      // Restored after a restart (or unloaded) and still wearing our paint.
+      rec.applied = Stage.Withering;
+      rec.appliedTitle = known.painted;
+      rec.realTitle = known.real;
+      rec.realFavIconUrl = known.icon;
+    }
     state.records[id] = rec;
   }
+  if (tab.url && tab.url !== 'about:blank') rec.url = tab.url;
   if (rec.applied === Stage.Alive) {
     rec.realTitle = tab.title;
     if (!isOurIcon(tab.favIconUrl)) rec.realFavIconUrl = tab.favIconUrl;
@@ -101,23 +140,43 @@ async function hasHostAccess(): Promise<boolean> {
 }
 
 /** Talk to our content script in a tab, injecting it first if asked to. */
+const SEND_TIMEOUT_MS = 3000;
+const TIMED_OUT = new Error('timed out');
+
+/** A browser can freeze a background tab; never let one stall the whole queue. */
+function withTimeout<T>(promise: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) => (timer = setTimeout(() => reject(TIMED_OUT), SEND_TIMEOUT_MS))),
+  ]).finally(() => clearTimeout(timer));
+}
+
+/** Talk to our content script in a tab, injecting it first if asked to. */
 async function send<T>(tabId: number, cmd: PageCommand, inject: boolean): Promise<T | undefined> {
   try {
-    return (await ext.tabs.sendMessage(tabId, cmd)) as T;
-  } catch {
-    if (!inject) return undefined;
+    return (await withTimeout(ext.tabs.sendMessage(tabId, cmd))) as T;
+  } catch (err) {
+    // A frozen page would hang an injection too, so only inject when nobody answered.
+    if (!inject || err === TIMED_OUT) return undefined;
   }
   try {
-    await ext.scripting.executeScript({ target: { tabId }, files: ['content.js'] });
-    return (await ext.tabs.sendMessage(tabId, cmd)) as T;
+    await withTimeout(ext.scripting.executeScript({ target: { tabId }, files: ['content.js'] }));
+    return (await withTimeout(ext.tabs.sendMessage(tabId, cmd))) as T;
   } catch {
     // Restricted page, discarded tab, or no host permission: leave it alone.
     return undefined;
   }
 }
 
-async function restoreTab(tabId: number, rec: TabRecord | undefined): Promise<void> {
+/** Unloaded or frozen tabs keep their last face; there is no page to repaint. */
+function isAsleep(tab: chrome.tabs.Tab): boolean {
+  return !!tab.discarded || !!(tab as chrome.tabs.Tab & { frozen?: boolean }).frozen;
+}
+
+async function restoreTab(tabId: number, rec: TabRecord | undefined, url?: string): Promise<void> {
   await send(tabId, { type: 'haunt:restore' }, false);
+  rememberPaint(url, undefined);
   if (rec) {
     rec.applied = Stage.Alive;
     rec.appliedTitle = undefined;
@@ -127,18 +186,11 @@ async function restoreTab(tabId: number, rec: TabRecord | undefined): Promise<vo
 /** Paint a tab to match its stage of decay. */
 async function paint(tab: chrome.tabs.Tab, rec: TabRecord, stage: Stage, now: number): Promise<void> {
   if (stage === Stage.Alive) {
-    if (rec.applied !== Stage.Alive) await restoreTab(tab.id!, rec);
+    if (rec.applied !== Stage.Alive) await restoreTab(tab.id!, rec, tab.url);
     return;
   }
-  if (tab.discarded) return;
-  const title = hauntedTitle({
-    stage,
-    realTitle: rec.realTitle ?? tab.title ?? '',
-    url: tab.url ?? '',
-    idleMs: now - rec.lastSeen,
-    thresholdMinutes: settings.thresholdMinutes,
-    seed: rec.seed,
-  });
+  if (isAsleep(tab)) return;
+  const title = paintedTitle(tab, rec, stage, now);
   if (stage === rec.applied && title === rec.appliedTitle) return;
   const icon = await iconFor(stage, tab.url ?? '', rec.realFavIconUrl);
   const res = await send<{ ok: boolean; realTitle?: string }>(tab.id!, { type: 'haunt:apply', title, icon }, true);
@@ -146,6 +198,18 @@ async function paint(tab: chrome.tabs.Tab, rec: TabRecord, stage: Stage, now: nu
   rec.applied = stage;
   rec.appliedTitle = title;
   if (res.realTitle !== undefined) rec.realTitle = res.realTitle;
+  rememberPaint(tab.url, { real: rec.realTitle, painted: title, icon: rec.realFavIconUrl });
+}
+
+function paintedTitle(tab: chrome.tabs.Tab, rec: TabRecord, stage: Stage, now: number): string {
+  return hauntedTitle({
+    stage,
+    realTitle: rec.realTitle ?? tab.title ?? '',
+    url: tab.url ?? '',
+    idleMs: now - rec.lastSeen,
+    thresholdMinutes: settings.thresholdMinutes,
+    seed: rec.seed,
+  });
 }
 
 /** Only touch a tab we could look inside and that has no unsaved input. */
@@ -220,6 +284,8 @@ async function tick(): Promise<void> {
   const tabs = await ext.tabs.query({});
   const alive = new Set(tabs.map((t) => t.id));
   for (const id of Object.keys(state.records)) if (!alive.has(Number(id))) delete state.records[Number(id)];
+  const openUrls = new Set(tabs.map((t) => t.url));
+  for (const url of Object.keys(painted)) if (!openUrls.has(url)) rememberPaint(url, undefined);
 
   const stages = new Map<number, Stage>();
   for (const tab of tabs) {
@@ -239,6 +305,11 @@ async function tick(): Promise<void> {
         const stage = stages.get(tab.id!);
         if (!rec || stage === undefined) return;
         await paint(tab, rec, stage, now);
+        if (tab.active && settings.cobwebs && !rec.cobwebsArmed && !isProtected(tab) && !isAsleep(tab) && tab.status === 'complete') {
+          // Even the tab you are on gathers webs if you stop touching it.
+          const res = await send<{ ok: boolean }>(tab.id!, { type: 'haunt:cobwebs', webs: 0, growAfterMs: growAfterMs() }, true);
+          if (res?.ok) rec.cobwebsArmed = true;
+        }
         if (tab.active || stage < Stage.Ghost) return;
         if (settings.autoBury && stage === Stage.Entombed && (windowSizes.get(tab.windowId) ?? 0) > 1) {
           if (await isSafeToClose(tab, rec)) {
@@ -311,6 +382,16 @@ async function maybePoltergeist(tabs: chrome.tabs.Tab[], stages: Map<number, Sta
   await persist();
 }
 
+const WEBS_BY_STAGE: Record<Stage, number> = {
+  [Stage.Alive]: 0,
+  [Stage.Withering]: 2,
+  [Stage.Ghost]: 3,
+  [Stage.Dead]: 5,
+  [Stage.Entombed]: 7,
+};
+/** How long a return visit waits for a reloading tab before it is dropped. */
+const RETURN_TTL = 2 * 60_000;
+
 /** The user looked at a tab: it comes back to life, possibly not quietly. */
 async function wake(tabId: number, windowId: number): Promise<void> {
   const now = Date.now();
@@ -322,16 +403,66 @@ async function wake(tabId: number, windowId: number): Promise<void> {
   if (rec) {
     const idle = now - rec.lastSeen;
     rec.lastSeen = now;
-    if (rec.applied >= Stage.Dead && settings.enabled && settings.possession) {
-      await send(tabId, { type: 'haunt:glitch', message: possessionMessage(idle, rec.seed), thenRestore: true, durationMs: GLITCH_MS }, false);
+    rec.safeDiscarded = false;
+    const tab = await ext.tabs.get(tabId).catch(() => undefined);
+    // A waking tab can briefly report about:blank (Firefox); judge it by where it really is.
+    const known = tab && tab.url === 'about:blank' && rec.url ? { ...tab, url: rec.url } : tab;
+    const stage =
+      known && settings.enabled && !isProtected(known) ? Math.max(rec.applied, stageFor(idle, settings.thresholdMinutes)) : Stage.Alive;
+    const ready = !!tab && tab.status === 'complete' && !isAsleep(tab);
+    if (!ready || !(await returnVisit(tab, rec, stage, idle))) {
+      // The browser unloaded or froze this tab to save memory and is bringing it
+      // back now. Our paint went with the old page; replay the visit once a fresh
+      // page answers (see onUpdated).
       rec.applied = Stage.Alive;
       rec.appliedTitle = undefined;
-    } else if (rec.applied !== Stage.Alive) {
-      await restoreTab(tabId, rec);
+      rememberPaint(tab?.url, undefined);
+      if (stage !== Stage.Alive) rec.pendingReturn = { stage, idle, at: now };
     }
-    rec.safeDiscarded = false;
   }
   await persist();
+}
+
+/**
+ * What greets you on a neglected tab: a possession for the dead, cobwebs for
+ * anything stale. Resolves false if the page never answered, so it can be retried.
+ */
+async function returnVisit(tab: chrome.tabs.Tab, rec: TabRecord, stage: Stage, idle: number): Promise<boolean> {
+  const tabId = tab.id!;
+  let delivered = true;
+  if (stage >= Stage.Dead && settings.possession) {
+    if (rec.applied < Stage.Dead) {
+      // A reloaded page lost its skull. Put it back for the moment of possession.
+      const title = paintedTitle(tab, rec, stage, Date.now());
+      await send(tabId, { type: 'haunt:apply', title, icon: await iconFor(stage as Exclude<Stage, Stage.Alive>, tab.url ?? '', rec.realFavIconUrl) }, true);
+    }
+    const res = await send<{ ok: boolean }>(
+      tabId,
+      { type: 'haunt:glitch', message: possessionMessage(idle, rec.seed), thenRestore: true, durationMs: GLITCH_MS },
+      false,
+    );
+    delivered = !!res?.ok;
+  } else if (rec.applied !== Stage.Alive) {
+    await send(tabId, { type: 'haunt:restore' }, false);
+  }
+  rec.applied = Stage.Alive;
+  rec.appliedTitle = undefined;
+  rememberPaint(tab.url, undefined);
+  if (settings.cobwebs && stage >= Stage.Withering) {
+    const res = await send<{ ok: boolean }>(tabId, { type: 'haunt:cobwebs', webs: WEBS_BY_STAGE[stage], growAfterMs: growAfterMs() }, true);
+    if (res?.ok) rec.cobwebsArmed = true;
+    delivered &&= !!res?.ok;
+  }
+  if (delivered) {
+    rec.pendingReturn = undefined;
+    if (stage !== Stage.Alive) rec.lastReturn = { stage, idle, at: Date.now() };
+  }
+  return delivered;
+}
+
+/** The page you are on gathers a new web after sitting untouched this long. */
+function growAfterMs(): number {
+  return settings.thresholdMinutes * 60_000;
 }
 
 async function ensureAlarm(): Promise<void> {
@@ -356,11 +487,15 @@ async function exorcise(): Promise<void> {
         if (rec && rec.applied !== Stage.Alive) await ext.tabs.reload(tab.id!).catch(() => {});
       } else {
         await send(tab.id!, { type: 'haunt:restore' }, false);
+        await send(tab.id!, { type: 'haunt:sweep' }, false);
       }
+      rememberPaint(tab.url, undefined);
       if (rec) {
         rec.applied = Stage.Alive;
         rec.appliedTitle = undefined;
         rec.safeDiscarded = false;
+        rec.cobwebsArmed = false;
+        rec.pendingReturn = undefined;
       }
     }),
   );
@@ -377,6 +512,11 @@ async function setSettings(patch: Partial<Settings>): Promise<void> {
   }
   settings = { ...settings, ...patch };
   await saveSettings(settings);
+  if (patch.cobwebs === false) {
+    const tabs = await ext.tabs.query({});
+    await Promise.all(tabs.map((t) => send(t.id!, { type: 'haunt:sweep' }, false)));
+    for (const rec of Object.values(state.records)) rec.cobwebsArmed = false;
+  }
   await ensureAlarm();
   await tick();
 }
@@ -508,9 +648,24 @@ ext.tabs.onUpdated.addListener((tabId, info, tab) => {
   locked(async () => {
     const rec = state.records[tabId];
     if (!rec || !settings.enabled) return;
+    if (info.status === 'loading') {
+      rec.cobwebsArmed = false; // a new page has no webs yet
+      // Firefox wakes an unloaded tab as a placeholder first and only then really
+      // reloads it, wiping a visit that has only just played. Play it again.
+      const last = rec.lastReturn;
+      if (tab.active && last && !rec.pendingReturn && Date.now() - last.at < 5000) {
+        rec.pendingReturn = { ...last, at: Date.now() };
+        rec.lastReturn = undefined;
+      }
+    }
     if (info.audible || info.pinned) {
       // Never haunt a tab that is playing sound or has been pinned.
-      await restoreTab(tabId, rec);
+      await restoreTab(tabId, rec, tab.url);
+    } else if (info.status === 'complete' && rec.pendingReturn && tab.active) {
+      // A tab the browser had unloaded has finished reloading: now it can greet you.
+      const { stage, idle, at } = rec.pendingReturn;
+      // Keep it queued if nobody answered; the next load gets another try.
+      if (Date.now() - at > RETURN_TTL || (await returnVisit(tab, rec, stage, idle))) rec.pendingReturn = undefined;
     } else if (info.status === 'complete' && rec.applied !== Stage.Alive && !tab.active) {
       // The page reloaded or navigated, which wipes our paint. Put it back.
       rec.appliedTitle = undefined;

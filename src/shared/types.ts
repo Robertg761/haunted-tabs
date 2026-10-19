@@ -18,6 +18,8 @@ export interface Settings {
   poltergeist: boolean;
   /** Notifications about forgotten tabs. Needs the optional notifications permission. */
   whispers: boolean;
+  /** Neglected pages gather cobwebs that scrolling or sweeping the mouse tears away. */
+  cobwebs: boolean;
   /** Discard ghost tabs to free memory. */
   autoDiscard: boolean;
   /** Close entombed tabs and move them to the Graveyard. */
@@ -30,6 +32,7 @@ export const DEFAULT_SETTINGS: Settings = {
   possession: true,
   poltergeist: true,
   whispers: false,
+  cobwebs: true,
   autoDiscard: false,
   autoBury: false,
 };
@@ -37,6 +40,8 @@ export const DEFAULT_SETTINGS: Settings = {
 /** What the background remembers about each open tab (kept in storage.session). */
 export interface TabRecord {
   lastSeen: number;
+  /** Last real URL seen, for moments when a waking tab reports about:blank. */
+  url?: string;
   /** Stage currently painted onto the page. */
   applied: Stage;
   appliedTitle?: string;
@@ -44,6 +49,12 @@ export interface TabRecord {
   realFavIconUrl?: string;
   /** Set when we discarded the tab after checking it had no unsaved input. */
   safeDiscarded?: boolean;
+  /** Cobweb growth is running in the current page. */
+  cobwebsArmed?: boolean;
+  /** A return visit to replay once a tab the browser unloaded has reloaded. */
+  pendingReturn?: { stage: Stage; idle: number; at: number };
+  /** The visit that just played, in case the page reloads straight after. */
+  lastReturn?: { stage: Stage; idle: number; at: number };
   seed: number;
 }
 
@@ -110,6 +121,9 @@ export type PageCommand =
   | { type: 'haunt:restore' }
   | { type: 'haunt:glitch'; message: string; thenRestore: boolean; durationMs: number }
   | { type: 'haunt:flicker'; titles: string[]; durationMs: number }
-  | { type: 'haunt:dirty' };
+  | { type: 'haunt:dirty' }
+  /** Lay `webs` cobwebs now, and keep weaving more after `growAfterMs` without activity. */
+  | { type: 'haunt:cobwebs'; webs: number; growAfterMs: number }
+  | { type: 'haunt:sweep' };
 
 export type PageEvent = { type: 'haunt:realTitle'; title: string };

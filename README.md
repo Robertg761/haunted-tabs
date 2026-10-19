@@ -23,6 +23,8 @@ Turn haunting on and tabs you leave alone start to **decay**. Every stage starts
 
 When you return to a **dead** tab it **possesses your screen** for about a second. The real page gets colour-rotted, inverted, sliced, and shaken, and a message like `I WAITED 3 HOURS` flashes up. Then it snaps back to normal with its real title and icon.
 
+Neglected pages also gather **cobwebs**. When you come back to a stale tab, its corners and open spaces are strung with webs: 2 for a withering tab, up to 7 for an entombed one, and a spider dangles on its thread. Some threads are glued to the window frame and some to the page itself. Scrolling drags the glued ends along with the content until they stretch and snap. Sweeping the mouse through them cuts threads and flings them. A web that loses enough threads gives way and drifts down out of sight. Even the tab you're on starts weaving a new web if you leave it untouched for the idle threshold. The webs are drawn on a click-through overlay, so the page underneath keeps working. They can be switched off in Settings.
+
 Optional extras:
 
 - **Poltergeists:** rare, rate-limited events. A dead tab's title flickers in the tab strip (`👁 👁`), or a dead tab reaches into the tab you're using and glitches it with a message like `"INBOX (3)" WANTS YOU BACK`. They get more frequent as the **haunt level** rises (Peaceful → Uneasy → Haunted → Possessed → Damned). The level depends on how many tabs you have and how old they are, and it shows in the popup and on the toolbar badge.
@@ -50,6 +52,16 @@ Optional extras:
 | `favicon` | Read favicons from the browser's local cache (Chrome only; Firefox has no equivalent, so it shows icons tabs already hold as `data:` URLs and a plain globe otherwise) |
 | `<all_urls>` (optional) | Requested when you turn haunting on, so pages can be repainted |
 | `notifications` (optional) | Requested only if you enable Whispers |
+
+## When the browser saves memory
+
+Browsers quietly put idle tabs to sleep. Chrome's Memory Saver and Firefox/Zen tab unloading throw the page away and keep only its title and icon. The page reloads when you click the tab. Browsers can also freeze a background tab's scripts. The haunting is built to survive all of this:
+
+- **Decay keeps counting while a tab sleeps.** Idle time, stage, the haunt level, and the popup are all tracked by the extension, not the page. A sleeping tab keeps whatever face it had in the tab strip. Nothing can repaint it without waking it up, and the extension will not reload your tabs just to haunt them.
+- **The scare waits for the reload.** When you return to a tab the browser unloaded, the possession and cobwebs are queued until the fresh page has loaded and answered. A dead tab gets its skull back for a moment, glitches, and then comes back to life, exactly as if it had never been unloaded. Firefox briefly wakes tabs as a blank placeholder before the real reload, and that case is handled too.
+- **A frozen tab can't jam the haunting.** Every message to a page gives up after 3 seconds, so one frozen tab never holds up the rest. Tabs known to be asleep or frozen are skipped until they wake.
+- **Restarts are remembered.** After a browser restart, restored tabs may still show a ghost title before they load. The extension keeps a small record of which pages it painted, so it recognises them, still knows their real titles, and Exorcise can clean them up.
+- **It never buries what it can't check.** A tab the browser unloaded can't be checked for unsaved input, so auto-burial leaves it alone. The extension only auto-buries tabs it inspected itself.
 
 ## Install
 
@@ -106,7 +118,7 @@ Firefox runs the same code. The differences are handled at runtime:
 Layout:
 
 - `src/background/`: service worker. Tracks idle time, decides stages, buries, discards, poltergeists.
-- `src/content/`: injected into pages on demand. Swaps the title and favicon, plays the glitch, checks for unsaved input.
+- `src/content/`: injected into pages on demand. Swaps the title and favicon, plays the glitch, checks for unsaved input. `cobwebs.ts` is the cobweb physics: a small Verlet simulation on a canvas overlay.
 - `src/popup/`: the tab manager.
 - `src/graveyard/`: the Graveyard page.
 - `src/shared/haunt.ts`: pure decay logic (stages, eerie titles, haunt level), unit tested.

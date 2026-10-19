@@ -12,7 +12,7 @@ const thresholdSelect = $<HTMLSelectElement>('threshold');
 const list = $<HTMLElement>('list');
 const notice = $<HTMLElement>('notice');
 
-const CHECKS = ['possession', 'poltergeist', 'whispers', 'autoDiscard', 'autoBury'] as const;
+const CHECKS = ['possession', 'poltergeist', 'cobwebs', 'whispers', 'autoDiscard', 'autoBury'] as const;
 
 let snap: Snapshot | undefined;
 let lastSignature = '';
