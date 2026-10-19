@@ -1,0 +1,228 @@
+// End-to-end check against a real Chromium with the built extension loaded.
+// Serves a few local pages, turns haunting on, fast-forwards the worker's clock,
+// and checks real tabs decay, possess, get buried, resurrect, and exorcise.
+//   npm run e2e            (set SHOTS=dir to save screenshots)
+import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
+import { createServer } from 'node:http';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { chromium } from 'playwright-core';
+
+const MIN = 60_000;
+const shots = process.env.SHOTS;
+if (shots) mkdirSync(shots, { recursive: true });
+
+// The test build grants host access up front, standing in for the user
+// accepting the permission prompt when they switch haunting on.
+const extDir = mkdtempSync(join(tmpdir(), 'haunted-ext-'));
+cpSync('dist/chrome', extDir, { recursive: true });
+const manifest = JSON.parse(readFileSync(join(extDir, 'manifest.json'), 'utf8'));
+manifest.host_permissions = ['<all_urls>'];
+writeFileSync(join(extDir, 'manifest.json'), JSON.stringify(manifest));
+
+const FAV = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><rect width="16" height="16" fill="#e33"/></svg>`;
+const pages = {
+  '/alpha': `<title>Alpha page</title><link rel="icon" href="/fav.svg"><h1 style="font:48px sans-serif">Alpha: a perfectly normal page</h1><p>Lorem ipsum dolor sit amet.</p>`,
+  '/form': `<title>Form page</title><link rel="icon" href="/fav.svg"><form><input id="name"><textarea></textarea></form>`,
+  '/plain': `<title>Plain page</title><p>No favicon here.</p>`,
+  '/ticker': `<title>Ticker 0</title><link rel="icon" href="/fav.svg"><script>let n=0;setInterval(()=>{document.title='Ticker '+(++n)},300)</script>`,
+};
+const server = createServer((req, res) => {
+  if (req.url === '/fav.svg') {
+    res.writeHead(200, { 'content-type': 'image/svg+xml' });
+    return res.end(FAV);
+  }
+  const body = pages[req.url];
+  if (body === undefined) {
+    res.writeHead(404);
+    return res.end();
+  }
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+  res.end(`<!doctype html><html><head><meta charset="utf-8"></head><body>${body}</body></html>`);
+});
+await new Promise((r) => server.listen(0, '127.0.0.1', r));
+const origin = `http://127.0.0.1:${server.address().port}`;
+
+const userDir = mkdtempSync(join(tmpdir(), 'haunted-profile-'));
+const context = await chromium.launchPersistentContext(userDir, {
+  executablePath: process.env.CHROMIUM_PATH || '/opt/pw-browsers/chromium-1194/chrome-linux/chrome',
+  headless: false,
+  viewport: { width: 1000, height: 640 },
+  args: ['--headless=new', `--disable-extensions-except=${extDir}`, `--load-extension=${extDir}`],
+});
+
+let failures = 0;
+function check(cond, label) {
+  console.log(`${cond ? '✓' : '✗'} ${label}`);
+  if (!cond) failures++;
+}
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function eventually(fn, timeout = 5000) {
+  const end = Date.now() + timeout;
+  let last;
+  while (Date.now() < end) {
+    last = await fn();
+    if (last) return last;
+    await sleep(150);
+  }
+  return last;
+}
+
+try {
+  const sw = context.serviceWorkers()[0] ?? (await context.waitForEvent('serviceworker'));
+  const extId = new URL(sw.url()).host;
+
+  // Shift the worker's clock instead of waiting for hours.
+  await sw.evaluate(() => {
+    const realNow = Date.now.bind(Date);
+    self.__offset = 0;
+    Date.now = () => realNow() + self.__offset;
+  });
+  const advance = (ms) => sw.evaluate((ms) => (self.__offset += ms), ms);
+  const tabTitle = (url) => sw.evaluate(async (url) => (await chrome.tabs.query({ url }))[0]?.title, url);
+
+  const control = context.pages()[0] ?? (await context.newPage());
+  await control.goto(`chrome-extension://${extId}/popup/index.html`);
+  const ask = (req) => control.evaluate((req) => chrome.runtime.sendMessage(req), req);
+
+  const alpha = await context.newPage();
+  await alpha.goto(`${origin}/alpha`);
+  const form = await context.newPage();
+  await form.goto(`${origin}/form`);
+  const plain = await context.newPage();
+  await plain.goto(`${origin}/plain`);
+  const ticker = await context.newPage();
+  await ticker.goto(`${origin}/ticker`);
+  await form.bringToFront();
+  await form.fill('#name', 'half-written message');
+  await control.bringToFront();
+  await sleep(300);
+
+  let snap = await ask({ type: 'snapshot' });
+  check(snap.settings.enabled === false, 'haunting is off until the user opts in');
+  check(snap.tabs.length >= 5, `popup sees every real tab (${snap.tabs.length})`);
+  check((await alpha.title()) === 'Alpha page', 'nothing is touched while dormant');
+
+  // Poltergeists are random; they get their own check below.
+  snap = await ask({ type: 'setSettings', settings: { enabled: true, thresholdMinutes: 30, poltergeist: false } });
+  check(snap.settings.enabled && snap.hostPermission, 'haunting turns on');
+  check((await alpha.title()) === 'Alpha page', 'fresh tabs stay alive');
+
+  await advance(31 * MIN);
+  await ask({ type: 'setSettings', settings: {} });
+  const withered = await alpha.title();
+  check(withered !== 'Alpha page' && !withered.startsWith('👻'), `withering title rots: "${withered}"`);
+  check(await alpha.evaluate(() => !!document.querySelector('link[data-haunted-tabs][rel=icon]')), 'favicon replaced');
+  check(await alpha.evaluate(() => !document.querySelector('link[href="/fav.svg"]')), 'real favicon set aside, not deleted');
+
+  await advance(30 * MIN);
+  await ask({ type: 'setSettings', settings: {} });
+  check((await alpha.title()).startsWith('👻'), `ghost title: "${await alpha.title()}"`);
+  check((await tabTitle(`${origin}/alpha`))?.startsWith('👻'), 'tab strip shows the ghost title');
+  snap = await ask({ type: 'snapshot' });
+  const alphaView = snap.tabs.find((t) => t.url.endsWith('/alpha'));
+  check(alphaView?.title === 'Alpha page', 'popup still shows the real title');
+  check(alphaView?.stage === 2, 'popup reports ghost stage');
+
+  // Discarding itself can't run here (Playwright drops the whole context when a
+  // tab is discarded), but the safety check in front of it can.
+  const formId = await sw.evaluate(async (url) => (await chrome.tabs.query({ url }))[0].id, `${origin}/form`);
+  const refused = await ask({ type: 'discard', tabId: formId });
+  check(refused.ok === false, 'tab with unsaved input refuses to be discarded');
+
+  // A page that keeps rewriting its own title stays haunted.
+  await sleep(1000);
+  check((await ticker.title()).startsWith('👻'), `self-retitling page stays haunted: "${await ticker.title()}"`);
+
+  await advance(61 * MIN);
+  await ask({ type: 'setSettings', settings: {} });
+  check((await alpha.title()).startsWith('💀'), `dead title: "${await alpha.title()}"`);
+  snap = await ask({ type: 'snapshot' });
+  check(snap.level.index >= 2, `haunt level rises: ${snap.level.name}`);
+
+  // Poltergeist: with chance forced, a dead tab flickers its title.
+  await sw.evaluate(() => {
+    self.__random = Math.random;
+    Math.random = () => 0;
+  });
+  await advance(20 * MIN);
+  await ask({ type: 'setSettings', settings: { poltergeist: true } });
+  const flickered = await eventually(async () => {
+    const t = await alpha.title();
+    return t === '👁 👁' || t === '…help…' || (!t.startsWith('💀') && t !== 'Alpha page');
+  }, 3000);
+  check(flickered, 'poltergeist flickers a dead tab title');
+  check(await eventually(async () => (await alpha.title()).startsWith('💀'), 4000), 'flicker settles back to the haunting');
+  await sw.evaluate(() => (Math.random = self.__random));
+  await ask({ type: 'setSettings', settings: { poltergeist: false } });
+
+  // Returning to a dead tab: it possesses the screen, then comes back to life.
+  await alpha.bringToFront();
+  const glitched = await eventually(() => alpha.evaluate(() => !!document.querySelector('[data-haunted-tabs="glitch"]')), 2000);
+  check(glitched, 'returning to a dead tab triggers the glitch');
+  if (shots && glitched) {
+    await sleep(350);
+    await alpha.screenshot({ path: join(shots, 'possession.png') });
+  }
+  const restored = await eventually(async () => (await alpha.title()) === 'Alpha page', 4000);
+  check(restored, 'real title comes back after the possession');
+  check(await alpha.evaluate(() => !!document.querySelector('link[href="/fav.svg"]') && !document.querySelector('link[data-haunted-tabs][rel=icon]')), 'real favicon restored');
+  check(await alpha.evaluate(() => !document.querySelector('[data-haunted-tabs="glitch"]')), 'glitch overlay cleaned up');
+
+  // Manual close from the popup also lands in the Graveyard.
+  const tickerId = await sw.evaluate(async (url) => (await chrome.tabs.query({ url }))[0].id, `${origin}/ticker`);
+  await ask({ type: 'bury', tabId: tickerId });
+  const graves2 = await sw.evaluate(async () => (await chrome.storage.local.get('graveyard')).graveyard);
+  check(graves2.some((g) => g.url.endsWith('/ticker') && g.cause === 'you'), 'closing from the popup buries the tab');
+
+  // Burial: only safe tabs go to the Graveyard. Alpha stays in view.
+  await advance(250 * MIN);
+  await ask({ type: 'setSettings', settings: { autoBury: true } });
+  await sleep(500);
+  const open = await sw.evaluate(async () => (await chrome.tabs.query({})).map((t) => t.url));
+  check(!open.some((u) => u.endsWith('/plain')), 'entombed tab is buried');
+  check(open.some((u) => u.endsWith('/form')), 'tab with unsaved input is never buried');
+  check(open.some((u) => u.endsWith('/alpha')), 'the tab in view survives');
+  const graves = await sw.evaluate(async () => (await chrome.storage.local.get('graveyard')).graveyard);
+  check(graves?.some((g) => g.url.endsWith('/plain') && g.title === 'Plain page'), 'grave keeps the real URL and title');
+  await ask({ type: 'setSettings', settings: { autoBury: false } });
+
+  // Resurrect from the Graveyard page.
+  const yard = await context.newPage();
+  await yard.goto(`chrome-extension://${extId}/graveyard/index.html`);
+  await yard.waitForSelector('.stone');
+  check((await yard.locator('.stone').count()) === 2, 'Graveyard lists the buried tabs');
+  if (shots) await yard.screenshot({ path: join(shots, 'graveyard.png') });
+  await yard.locator('.stone', { hasText: 'Plain page' }).getByRole('button', { name: /Resurrect/ }).click();
+  const back = await eventually(() => sw.evaluate(async (url) => (await chrome.tabs.query({ url })).length === 1, `${origin}/plain`));
+  check(back, 'resurrected tab is open again');
+  check(await eventually(async () => (await yard.locator('.stone').count()) === 1), 'its grave is gone');
+
+  // Exorcise restores every haunted tab.
+  check((await form.title()).startsWith('⚰️'), `long-forgotten tab is entombed: "${await form.title()}"`);
+  await control.bringToFront();
+  if (shots) {
+    await control.setViewportSize({ width: 420, height: 600 });
+    await control.reload();
+    await sleep(800);
+    await control.screenshot({ path: join(shots, 'popup.png') });
+  }
+  snap = await ask({ type: 'exorcise' });
+  check(snap.settings.enabled === false, 'exorcise switches haunting off');
+  check(await eventually(async () => (await form.title()) === 'Form page'), 'exorcise restores real titles');
+  check((await form.inputValue('#name')) === 'half-written message', 'unsaved input is untouched');
+  check(await form.evaluate(() => !document.querySelector('link[data-haunted-tabs][rel=icon]')), 'exorcise restores favicons');
+  const badge = await sw.evaluate(() => chrome.action.getBadgeText({}));
+  check(badge === '', 'badge cleared');
+} catch (err) {
+  console.error(err);
+  failures++;
+} finally {
+  await context.close();
+  server.close();
+  rmSync(userDir, { recursive: true, force: true });
+  rmSync(extDir, { recursive: true, force: true });
+}
+
+console.log(failures ? `\n${failures} check(s) failed` : '\nAll checks passed');
+process.exit(failures ? 1 : 0);

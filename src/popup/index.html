@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Haunted Tabs</title>
+    <link rel="stylesheet" href="./popup.css" />
+  </head>
+  <body>
+    <header class="top">
+      <div class="brand">
+        <span class="logo" aria-hidden="true">👻</span>
+        <div>
+          <h1>Haunted Tabs</h1>
+          <p id="level-blurb" class="blurb">Your tabs rest easy.</p>
+        </div>
+      </div>
+      <label class="switch" title="Haunting is off until you turn it on">
+        <input type="checkbox" id="enabled" />
+        <span class="track" aria-hidden="true"><span class="thumb"></span></span>
+        <span id="enabled-label" class="switch-label">Dormant</span>
+      </label>
+    </header>
+
+    <section class="level" aria-live="polite">
+      <div class="level-row">
+        <span>Haunt level</span>
+        <strong id="level-name">Peaceful</strong>
+      </div>
+      <div class="meter"><div id="meter-fill" class="meter-fill"></div></div>
+      <div id="stats" class="stats"></div>
+    </section>
+
+    <section id="intro" class="intro" hidden>
+      <p>
+        Turn on haunting and tabs you leave alone too long begin to <em>decay</em>. Their titles rot into eerie
+        messages, their icons wither into ghosts and skulls, and the long dead may possess your screen when you
+        come back.
+      </p>
+      <p class="fine">
+        Nothing is ever deleted. Pinned tabs, tabs playing sound, and tabs with unsaved input are never touched.
+        Exorcise restores everything at once.
+      </p>
+    </section>
+
+    <div id="notice" class="notice" role="status" hidden></div>
+
+    <div class="toolbar">
+      <input type="search" id="search" placeholder="Search tabs…" aria-label="Search tabs" autocomplete="off" />
+      <select id="group" aria-label="Group tabs">
+        <option value="window">By window</option>
+        <option value="domain">By site</option>
+        <option value="idle">By decay</option>
+      </select>
+    </div>
+
+    <main id="list" class="list"></main>
+
+    <details id="settings" class="settings">
+      <summary>Settings</summary>
+      <label class="field">
+        <span>Tabs start to decay after</span>
+        <select id="threshold">
+          <option value="0.5">30 seconds (demo)</option>
+          <option value="1">1 minute</option>
+          <option value="5">5 minutes</option>
+          <option value="15">15 minutes</option>
+          <option value="30">30 minutes</option>
+          <option value="60">1 hour</option>
+          <option value="120">2 hours</option>
+          <option value="240">4 hours</option>
+        </select>
+      </label>
+      <p id="timeline" class="fine timeline"></p>
+      <label class="check"><input type="checkbox" id="possession" /> <span><b>Possession.</b> Dead tabs glitch your screen for a moment when you return to them.</span></label>
+      <label class="check"><input type="checkbox" id="poltergeist" /> <span><b>Poltergeists.</b> Rare title flickers, and the dead sometimes reach into the tab you are on.</span></label>
+      <label class="check"><input type="checkbox" id="whispers" /> <span><b>Whispers.</b> Notifications about forgotten tabs. Asks for notification permission.</span></label>
+      <label class="check"><input type="checkbox" id="autoDiscard" /> <span><b>Put ghosts to sleep.</b> Discard ghost tabs to free memory. They reload when you visit.</span></label>
+      <label class="check"><input type="checkbox" id="autoBury" /> <span><b>Bury the entombed.</b> Close tabs that reach the grave and keep them in the Graveyard.</span></label>
+    </details>
+
+    <footer class="bottom">
+      <button id="graveyard" class="btn">🪦 Graveyard <span id="grave-count" class="count"></span></button>
+      <button id="exorcise" class="btn danger" title="Turn off all haunting and restore every tab">✝ Exorcise</button>
+    </footer>
+
+    <div id="banish" class="banish" hidden><span>✝</span><p>The spirits have been banished.</p></div>
+
+    <script type="module" src="./popup.ts"></script>
+  </body>
+</html>
