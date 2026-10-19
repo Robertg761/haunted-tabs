@@ -3,11 +3,13 @@
   "version": "0.1.0",
   "description": "A haunted tab manager browser extension. It manages your real tabs, and neglected ones come back as ghosts.",
   "scripts": {
-    "build": "vite build && vite build -c vite.content.config.ts",
+    "build": "vite build && vite build -c vite.content.config.ts && node scripts/build-firefox.mjs",
     "typecheck": "tsc",
     "test": "vitest run",
     "e2e": "npm run build && node tests/e2e.mjs",
-    "icons": "node scripts/make-icons.mjs"
+    "icons": "node scripts/make-icons.mjs",
+    "lint:firefox": "web-ext lint --source-dir dist/firefox",
+    "e2e:firefox": "npm run build && node tests/e2e-firefox.mjs"
   },
   "repository": {
     "type": "git",
@@ -20,11 +22,14 @@
   },
   "homepage": "https://github.com/Robertg761/haunted-tabs#readme",
   "devDependencies": {
+    "@puppeteer/browsers": "^2.13.2",
     "@types/chrome": "^0.3.5",
     "playwright-core": "1.56",
+    "puppeteer-core": "^24.43.1",
     "typescript": "^5.9.3",
     "vite": "^5.4.21",
-    "vitest": "^2.1.9"
+    "vitest": "^2.1.9",
+    "web-ext": "^8.10.0"
   },
   "private": true,
   "type": "module"

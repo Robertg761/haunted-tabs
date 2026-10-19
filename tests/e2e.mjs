@@ -15,7 +15,7 @@ if (shots) mkdirSync(shots, { recursive: true });
 // The test build grants host access up front, standing in for the user
 // accepting the permission prompt when they switch haunting on.
 const extDir = mkdtempSync(join(tmpdir(), 'haunted-ext-'));
-cpSync('dist', extDir, { recursive: true });
+cpSync('dist/chrome', extDir, { recursive: true });
 const manifest = JSON.parse(readFileSync(join(extDir, 'manifest.json'), 'utf8'));
 manifest.host_permissions = ['<all_urls>'];
 writeFileSync(join(extDir, 'manifest.json'), JSON.stringify(manifest));

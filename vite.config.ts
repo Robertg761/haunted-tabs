@@ -9,7 +9,7 @@ export default defineConfig({
   publicDir: resolve(__dirname, 'public'),
   base: '',
   build: {
-    outDir: resolve(__dirname, 'dist'),
+    outDir: resolve(__dirname, 'dist/chrome'),
     emptyOutDir: true,
     target: 'chrome116',
     modulePreload: false,

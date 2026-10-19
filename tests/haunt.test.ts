@@ -48,6 +48,9 @@ describe('isHauntableUrl', () => {
     expect(isHauntableUrl('chrome-extension://abc/popup.html')).toBe(false);
     expect(isHauntableUrl('https://chromewebstore.google.com/detail/x')).toBe(false);
     expect(isHauntableUrl('https://chrome.google.com/webstore/detail/x')).toBe(false);
+    expect(isHauntableUrl('https://addons.mozilla.org/en-US/firefox/')).toBe(false);
+    expect(isHauntableUrl('about:config')).toBe(false);
+    expect(isHauntableUrl('moz-extension://abc/popup.html')).toBe(false);
     expect(isHauntableUrl(undefined)).toBe(false);
     expect(isHauntableUrl('not a url')).toBe(false);
   });

@@ -1,6 +1,7 @@
 import { STAGE_MULTIPLIERS, STAGE_NAMES, formatIdle, siteName } from '../shared/haunt';
 import { Stage, type PopupRequest, type Settings, type Snapshot, type TabView } from '../shared/types';
 import { STAGE_EMOJI, el, faviconUrl, openGraveyard } from '../shared/ui';
+import { ext } from '../shared/ext';
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -17,7 +18,7 @@ let snap: Snapshot | undefined;
 let lastSignature = '';
 
 async function ask<T = Snapshot>(req: PopupRequest): Promise<T> {
-  const res = await chrome.runtime.sendMessage(req);
+  const res = await ext.runtime.sendMessage(req);
   if (res && typeof res === 'object' && 'error' in res) throw new Error(String(res.error));
   return res as T;
 }
@@ -110,7 +111,7 @@ function metaText(t: TabView, on: boolean): string {
 
 function tabRow(t: TabView, on: boolean): HTMLElement {
   const flags = [t.pinned && '📌', t.audible && '🔊', t.discarded && '💤'].filter(Boolean).join(' ');
-  const img = el('img', { src: faviconUrl(t.url), alt: '', width: '16', height: '16' });
+  const img = el('img', { src: faviconUrl(t.url, t.favIconUrl), alt: '', width: '16', height: '16' });
   const open = el(
     'button',
     { class: 'open', title: `${t.title}\n${t.url}`, 'data-action': 'switch' },
@@ -185,10 +186,22 @@ async function update(settings: Partial<Settings>): Promise<void> {
   show(await ask({ type: 'setSettings', settings }));
 }
 
+/**
+ * Ask for a permission, and have the background apply `settings` once it is
+ * granted. Firefox closes the popup while its permission prompt is open, so the
+ * popup may never see the answer; the background finishes the job instead.
+ */
+function requestThen(permissions: chrome.permissions.Permissions, settings: Partial<Settings>): Promise<boolean> {
+  // The request must start synchronously inside the click, before any await.
+  const granted = ext.permissions.request(permissions);
+  ask({ type: 'armPermission', settings }).catch(() => {});
+  return granted;
+}
+
 enabledInput.addEventListener('change', async () => {
   if (enabledInput.checked) {
     // Requested from the click itself, so the browser shows its permission prompt.
-    const granted = await chrome.permissions.request({ origins: ['<all_urls>'] });
+    const granted = await requestThen({ origins: ['<all_urls>'] }, { enabled: true });
     if (!granted) {
       enabledInput.checked = false;
       say('Without permission to repaint tabs, the spirits cannot cross over. Haunting stays off.', 'warn');
@@ -222,7 +235,7 @@ for (const key of CHECKS) {
   const input = $<HTMLInputElement>(key);
   input.addEventListener('change', async () => {
     if (key === 'whispers' && input.checked) {
-      const granted = await chrome.permissions.request({ permissions: ['notifications'] });
+      const granted = await requestThen({ permissions: ['notifications'] }, { whispers: true });
       if (!granted) {
         input.checked = false;
         return;

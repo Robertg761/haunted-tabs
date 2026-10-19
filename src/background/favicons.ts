@@ -1,4 +1,5 @@
 import { Stage } from '../shared/types';
+import { ext, hasFaviconCache } from '../shared/ext';
 
 const svgUrl = (svg: string) => 'data:image/svg+xml,' + encodeURIComponent(svg.replace(/\s*\n\s*/g, ' ').trim());
 
@@ -59,11 +60,17 @@ function toBase64(buf: ArrayBuffer): string {
 }
 
 /**
- * The page's own favicon, drained of colour and cracked. Reads the browser's
- * local favicon cache through the `favicon` permission; nothing leaves the machine.
+ * The page's own favicon, drained of colour and cracked. In Chrome it is read
+ * from the local favicon cache (the `favicon` permission). Firefox has no such
+ * cache API, so there only icons the tab already holds as data: URLs are used.
+ * Nothing is ever fetched from the network.
  */
-async function paintWithered(pageUrl: string): Promise<string> {
-  const res = await fetch(chrome.runtime.getURL(`/_favicon/?pageUrl=${encodeURIComponent(pageUrl)}&size=32`));
+async function paintWithered(pageUrl: string, iconUrl: string | undefined): Promise<string> {
+  let source: string;
+  if (hasFaviconCache()) source = ext.runtime.getURL(`/_favicon/?pageUrl=${encodeURIComponent(pageUrl)}&size=32`);
+  else if (iconUrl?.startsWith('data:image/')) source = iconUrl;
+  else return WITHERED;
+  const res = await fetch(source);
   const bitmap = await createImageBitmap(await res.blob());
   const canvas = new OffscreenCanvas(32, 32);
   const ctx = canvas.getContext('2d');
@@ -98,7 +105,7 @@ async function paintWithered(pageUrl: string): Promise<string> {
   return url;
 }
 
-export async function iconFor(stage: Exclude<Stage, Stage.Alive>, pageUrl: string): Promise<string> {
+export async function iconFor(stage: Exclude<Stage, Stage.Alive>, pageUrl: string, iconUrl?: string): Promise<string> {
   if (stage !== Stage.Withering) return STAGE_ICONS[stage];
   let key: string;
   try {
@@ -109,7 +116,7 @@ export async function iconFor(stage: Exclude<Stage, Stage.Alive>, pageUrl: strin
   }
   let pending = witheredCache.get(key);
   if (!pending) {
-    pending = paintWithered(pageUrl).catch(() => WITHERED);
+    pending = paintWithered(pageUrl, iconUrl).catch(() => WITHERED);
     witheredCache.set(key, pending);
     if (witheredCache.size > 200) witheredCache.delete(witheredCache.keys().next().value!);
   }

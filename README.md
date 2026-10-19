@@ -47,20 +47,35 @@ Optional extras:
 | `storage` | Settings, Graveyard, and per-tab idle times |
 | `alarms` | The decay clock (every 30 seconds) |
 | `scripting` | Inject the small script that repaints a tab's title and favicon |
-| `favicon` | Read favicons from the browser's local cache |
+| `favicon` | Read favicons from the browser's local cache (Chrome only; Firefox has no equivalent, so it shows icons tabs already hold as `data:` URLs and a plain globe otherwise) |
 | `<all_urls>` (optional) | Requested when you turn haunting on, so pages can be repainted |
 | `notifications` (optional) | Requested only if you enable Whispers |
 
-## Install (Chrome, Edge, Brave)
+## Install
 
 ```sh
 npm install
 npm run build
 ```
 
-Then open `chrome://extensions`, enable **Developer mode**, click **Load unpacked**, and pick the `dist/` folder.
+That builds two copies of the same extension: `dist/chrome` and `dist/firefox`.
 
-For a quick demo, open Settings in the popup and set **Tabs start to decay after** to **30 seconds (demo)**. Tabs wither at 30s, ghost at 1m, die at 2m, and are entombed at 4m.
+### Chrome, Edge, Brave, Arc, Vivaldi
+
+Open `chrome://extensions`, enable **Developer mode**, click **Load unpacked**, and pick `dist/chrome`.
+
+### Firefox, Zen, LibreWolf, Floorp
+
+Firefox 128 or newer (any current Zen release qualifies).
+
+- **Try it now:** open `about:debugging#/runtime/this-firefox`, click **Load Temporary Add-on…**, and pick `dist/firefox/manifest.json`. It stays installed until the browser restarts.
+- **Keep it installed:** Firefox-based browsers only permanently install signed add-ons. Signing is free and can be private ("unlisted"): create API keys at [addons.mozilla.org](https://addons.mozilla.org/developers/addon/api/key/), then run `npx web-ext sign --source-dir dist/firefox --channel unlisted --api-key ... --api-secret ...` and open the `.xpi` it produces. (Firefox Developer Edition and Nightly can instead set `xpinstall.signatures.required` to `false` in `about:config`.)
+
+When you flip the switch, Firefox asks to let the add-on "access your data for all websites". The prompt may close the popup; haunting still turns on once you accept. You can review or revoke the permission in `about:addons` at any time.
+
+### Quick demo
+
+Open Settings in the popup and set **Tabs start to decay after** to **30 seconds (demo)**. Tabs wither at 30s, ghost at 1m, die at 2m, and are entombed at 4m.
 
 ## Development
 
@@ -68,9 +83,11 @@ For a quick demo, open Settings in the popup and set **Tabs start to decay after
 npm run typecheck   # TypeScript
 npm test            # unit tests for the decay logic (Vitest)
 npm run e2e         # builds, then drives a real Chromium with the extension loaded
+npm run e2e:firefox # same idea in a real Firefox (downloads one into .cache/, or set FIREFOX_PATH)
+npm run lint:firefox  # Mozilla's add-on linter on dist/firefox
 ```
 
-The end-to-end test opens real local pages and turns haunting on. It fast-forwards the service worker's clock, then checks:
+The end-to-end tests open real local pages and turn haunting on. It fast-forwards the service worker's clock, then checks:
 - titles and favicons decay, and pages that keep retitling themselves stay haunted
 - returning to a dead tab triggers the possession glitch and restores the page
 - poltergeist flickers happen
@@ -79,6 +96,12 @@ The end-to-end test opens real local pages and turns haunting on. It fast-forwar
 - Exorcise restores everything
 
 Set `SHOTS=some/dir` to save screenshots.
+
+Firefox runs the same code. The differences are handled at runtime:
+- Firefox exposes the promise-based API as `browser`, aliased in `src/shared/ext.ts`.
+- It runs the background as an event page instead of a service worker. `scripts/build-firefox.mjs` writes that into the Firefox manifest.
+- It has no favicon cache API.
+- Its `tabs.discard` resolves with nothing.
 
 Layout:
 

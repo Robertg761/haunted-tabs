@@ -99,7 +99,9 @@ export type PopupRequest =
   | { type: 'exorcise' }
   | { type: 'bury'; tabId: number }
   | { type: 'discard'; tabId: number }
-  | { type: 'switch'; tabId: number };
+  | { type: 'switch'; tabId: number }
+  /** Sent while a permission prompt is open: apply these settings once it is granted. */
+  | { type: 'armPermission'; settings: Partial<Settings> };
 
 /** Messages the background sends to the content script inside a page. */
 export type PageCommand =

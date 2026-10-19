@@ -31,6 +31,22 @@ export function stageProgress(idleMs: number, thresholdMinutes: number): number 
   return Math.min(1, Math.max(0, (idleMs - start) / (end - start)));
 }
 
+// Mozilla sites Firefox never lets extensions script.
+const FIREFOX_RESTRICTED = new Set([
+  'accounts-static.cdn.mozilla.net',
+  'accounts.firefox.com',
+  'addons.cdn.mozilla.net',
+  'addons.mozilla.org',
+  'api.accounts.firefox.com',
+  'content.cdn.mozilla.net',
+  'discovery.addons.mozilla.org',
+  'install.mozilla.org',
+  'oauth.accounts.firefox.com',
+  'profile.accounts.firefox.com',
+  'support.mozilla.org',
+  'sync.services.mozilla.com',
+]);
+
 /** Pages an extension may not script, or that we refuse to haunt. */
 export function isHauntableUrl(url: string | undefined): boolean {
   if (!url) return false;
@@ -42,7 +58,7 @@ export function isHauntableUrl(url: string | undefined): boolean {
   }
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:' && parsed.protocol !== 'file:') return false;
   const host = parsed.hostname;
-  if (host === 'chromewebstore.google.com') return false;
+  if (host === 'chromewebstore.google.com' || FIREFOX_RESTRICTED.has(host)) return false;
   if (host === 'chrome.google.com' && parsed.pathname.startsWith('/webstore')) return false;
   return true;
 }
@@ -52,7 +68,7 @@ export function siteName(url: string | undefined): string {
   try {
     const u = new URL(url);
     if (u.protocol === 'file:') return u.pathname.split('/').pop() || 'a file';
-    if (u.protocol === 'chrome-extension:') return 'extension page';
+    if (u.protocol === 'chrome-extension:' || u.protocol === 'moz-extension:') return 'extension page';
     if (u.protocol !== 'http:' && u.protocol !== 'https:') return `${u.protocol}//${u.hostname}`;
     return u.hostname.replace(/^www\./, '') || u.protocol.replace(':', '');
   } catch {

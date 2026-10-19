@@ -24,6 +24,7 @@ import {
   type TabView,
 } from '../shared/types';
 import { iconFor, isOurIcon } from './favicons';
+import { ext } from '../shared/ext';
 
 const TICK_ALARM = 'haunt-tick';
 const SESSION_KEY = 'hauntState';
@@ -34,6 +35,8 @@ interface SessionState {
   records: Record<number, TabRecord>;
   activeByWindow: Record<number, number>;
   lastPoltergeist: number;
+  /** Settings to apply when a pending permission prompt is accepted. */
+  pendingPermission?: { settings: Partial<Settings>; at: number };
 }
 
 let settings: Settings;
@@ -43,14 +46,14 @@ let loaded: Promise<void> | undefined;
 function load(): Promise<void> {
   loaded ??= (async () => {
     settings = await loadSettings();
-    const got = await chrome.storage.session.get(SESSION_KEY);
+    const got = await ext.storage.session.get(SESSION_KEY);
     if (got[SESSION_KEY]) state = got[SESSION_KEY] as SessionState;
   })();
   return loaded;
 }
 
 function persist(): Promise<void> {
-  return chrome.storage.session.set({ [SESSION_KEY]: state });
+  return ext.storage.session.set({ [SESSION_KEY]: state });
 }
 
 // Every event handler runs through this queue, so the service worker never
@@ -94,19 +97,19 @@ function stageOf(tab: chrome.tabs.Tab, rec: TabRecord, now: number): Stage {
 }
 
 async function hasHostAccess(): Promise<boolean> {
-  return chrome.permissions.contains(ALL_URLS);
+  return ext.permissions.contains(ALL_URLS);
 }
 
 /** Talk to our content script in a tab, injecting it first if asked to. */
 async function send<T>(tabId: number, cmd: PageCommand, inject: boolean): Promise<T | undefined> {
   try {
-    return (await chrome.tabs.sendMessage(tabId, cmd)) as T;
+    return (await ext.tabs.sendMessage(tabId, cmd)) as T;
   } catch {
     if (!inject) return undefined;
   }
   try {
-    await chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] });
-    return (await chrome.tabs.sendMessage(tabId, cmd)) as T;
+    await ext.scripting.executeScript({ target: { tabId }, files: ['content.js'] });
+    return (await ext.tabs.sendMessage(tabId, cmd)) as T;
   } catch {
     // Restricted page, discarded tab, or no host permission: leave it alone.
     return undefined;
@@ -137,7 +140,7 @@ async function paint(tab: chrome.tabs.Tab, rec: TabRecord, stage: Stage, now: nu
     seed: rec.seed,
   });
   if (stage === rec.applied && title === rec.appliedTitle) return;
-  const icon = await iconFor(stage, tab.url ?? '');
+  const icon = await iconFor(stage, tab.url ?? '', rec.realFavIconUrl);
   const res = await send<{ ok: boolean; realTitle?: string }>(tab.id!, { type: 'haunt:apply', title, icon }, true);
   if (!res?.ok) return;
   rec.applied = stage;
@@ -184,15 +187,20 @@ async function bury(tab: chrome.tabs.Tab, rec: TabRecord, cause: Grave['cause'],
     idleMs: now - rec.lastSeen,
     cause,
   });
-  await chrome.tabs.remove(tab.id!);
+  await ext.tabs.remove(tab.id!);
   delete state.records[tab.id!];
 }
 
 async function discard(tab: chrome.tabs.Tab, rec: TabRecord): Promise<void> {
-  const result = await chrome.tabs.discard(tab.id!).catch(() => undefined);
-  if (!result) return;
+  let result: chrome.tabs.Tab | undefined;
+  try {
+    // Chrome resolves with the discarded tab; Firefox resolves with nothing.
+    result = (await ext.tabs.discard(tab.id!)) ?? undefined;
+  } catch {
+    return;
+  }
   rec.safeDiscarded = true;
-  if (result.id !== undefined && result.id !== tab.id) {
+  if (result?.id !== undefined && result.id !== tab.id) {
     state.records[result.id] = rec;
     delete state.records[tab.id!];
   }
@@ -202,14 +210,14 @@ const LEVEL_COLORS = ['#4b5563', '#6d28d9', '#7e22ce', '#b91c1c', '#7f1d1d'];
 
 async function updateBadge(level: HauntLevel, ghosts: number): Promise<void> {
   const on = settings.enabled;
-  await chrome.action.setBadgeText({ text: on && ghosts > 0 ? String(ghosts) : '' });
-  await chrome.action.setBadgeBackgroundColor({ color: LEVEL_COLORS[level.index] });
-  await chrome.action.setTitle({ title: on ? `Haunted Tabs: ${level.name}` : 'Haunted Tabs (dormant)' });
+  await ext.action.setBadgeText({ text: on && ghosts > 0 ? String(ghosts) : '' });
+  await ext.action.setBadgeBackgroundColor({ color: LEVEL_COLORS[level.index] });
+  await ext.action.setTitle({ title: on ? `Haunted Tabs: ${level.name}` : 'Haunted Tabs (dormant)' });
 }
 
 async function tick(): Promise<void> {
   const now = Date.now();
-  const tabs = await chrome.tabs.query({});
+  const tabs = await ext.tabs.query({});
   const alive = new Set(tabs.map((t) => t.id));
   for (const id of Object.keys(state.records)) if (!alive.has(Number(id))) delete state.records[Number(id)];
 
@@ -280,21 +288,20 @@ async function maybePoltergeist(tabs: chrome.tabs.Tab[], stages: Map<number, Sta
   }
   if (settings.poltergeist && settings.possession && (stages.get(victim.id!) ?? 0) >= Stage.Dead) {
     events.push(async () => {
-      const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+      const [active] = await ext.tabs.query({ active: true, lastFocusedWindow: true });
       if (!active?.id || isProtected(active)) return false;
       const message = poltergeistMessage(realTitle, rec.seed + now);
       const res = await send<{ ok: boolean }>(active.id, { type: 'haunt:glitch', message, thenRestore: false, durationMs: GLITCH_MS }, true);
       return !!res?.ok;
     });
   }
-  if (settings.whispers && (await chrome.permissions.contains({ permissions: ['notifications'] }))) {
+  if (settings.whispers && (await ext.permissions.contains({ permissions: ['notifications'] }))) {
     events.push(async () => {
-      await chrome.notifications.create(`whisper:${victim.id}:${now}`, {
+      await ext.notifications.create(`whisper:${victim.id}:${now}`, {
         type: 'basic',
-        iconUrl: chrome.runtime.getURL('icons/icon128.png'),
+        iconUrl: ext.runtime.getURL('icons/icon128.png'),
         title: '👻 A whisper from your tabs',
         message: `“${realTitle.slice(0, 60)}” has been alone for ${spokenDuration(now - rec.lastSeen)}. It misses you.`,
-        priority: 0,
       });
       return true;
     });
@@ -329,9 +336,9 @@ async function wake(tabId: number, windowId: number): Promise<void> {
 
 async function ensureAlarm(): Promise<void> {
   if (settings.enabled) {
-    if (!(await chrome.alarms.get(TICK_ALARM))) await chrome.alarms.create(TICK_ALARM, { periodInMinutes: 0.5 });
+    if (!(await ext.alarms.get(TICK_ALARM))) await ext.alarms.create(TICK_ALARM, { periodInMinutes: 0.5 });
   } else {
-    await chrome.alarms.clear(TICK_ALARM);
+    await ext.alarms.clear(TICK_ALARM);
   }
 }
 
@@ -340,13 +347,13 @@ async function exorcise(): Promise<void> {
   settings = { ...settings, enabled: false };
   await saveSettings(settings);
   await ensureAlarm();
-  const tabs = await chrome.tabs.query({});
+  const tabs = await ext.tabs.query({});
   await Promise.all(
     tabs.map(async (tab) => {
       const rec = state.records[tab.id!];
       if (tab.discarded) {
         // A sleeping tab still shows its ghostly title; waking it loads the real page.
-        if (rec && rec.applied !== Stage.Alive) await chrome.tabs.reload(tab.id!).catch(() => {});
+        if (rec && rec.applied !== Stage.Alive) await ext.tabs.reload(tab.id!).catch(() => {});
       } else {
         await send(tab.id!, { type: 'haunt:restore' }, false);
       }
@@ -362,6 +369,7 @@ async function exorcise(): Promise<void> {
 }
 
 async function setSettings(patch: Partial<Settings>): Promise<void> {
+  state.pendingPermission = undefined;
   const wasEnabled = settings.enabled;
   if (patch.enabled === false && wasEnabled) {
     await exorcise();
@@ -375,7 +383,7 @@ async function setSettings(patch: Partial<Settings>): Promise<void> {
 
 async function snapshot(): Promise<Snapshot> {
   const now = Date.now();
-  const tabs = await chrome.tabs.query({});
+  const tabs = await ext.tabs.query({});
   const views: TabView[] = [];
   for (const tab of tabs) {
     if (tab.id === undefined) continue;
@@ -387,6 +395,7 @@ async function snapshot(): Promise<Snapshot> {
       index: tab.index,
       title: (rec.applied === Stage.Alive ? tab.title : rec.realTitle) || tab.url || 'Untitled',
       url: tab.url ?? tab.pendingUrl ?? '',
+      favIconUrl: rec.applied === Stage.Alive && !isOurIcon(tab.favIconUrl) ? tab.favIconUrl : rec.realFavIconUrl,
       idleMs: tab.active ? 0 : now - rec.lastSeen,
       stage: stageOf(tab, rec, now),
       active: !!tab.active,
@@ -396,7 +405,7 @@ async function snapshot(): Promise<Snapshot> {
       hauntable: isHauntableUrl(tab.url),
     });
   }
-  const focused = await chrome.windows.getLastFocused().catch(() => undefined);
+  const focused = await ext.windows.getLastFocused().catch(() => undefined);
   return {
     settings,
     level: hauntLevel(views.map((v) => v.stage)),
@@ -417,19 +426,23 @@ async function handle(req: PopupRequest): Promise<unknown> {
     case 'exorcise':
       await exorcise();
       return snapshot();
+    case 'armPermission':
+      state.pendingPermission = { settings: req.settings, at: Date.now() };
+      await persist();
+      return { ok: true };
     case 'switch': {
-      const tab = await chrome.tabs.update(req.tabId, { active: true });
-      if (tab?.windowId !== undefined) await chrome.windows.update(tab.windowId, { focused: true });
+      const tab = await ext.tabs.update(req.tabId, { active: true });
+      if (tab?.windowId !== undefined) await ext.windows.update(tab.windowId, { focused: true });
       return { ok: true };
     }
     case 'bury': {
-      const tab = await chrome.tabs.get(req.tabId);
+      const tab = await ext.tabs.get(req.tabId);
       await bury(tab, recordFor(tab, Date.now()), 'you', Date.now());
       await persist();
       return { ok: true };
     }
     case 'discard': {
-      const tab = await chrome.tabs.get(req.tabId);
+      const tab = await ext.tabs.get(req.tabId);
       const rec = recordFor(tab, Date.now());
       if (tab.active) return { ok: false, reason: 'You are looking at that tab.' };
       if (!(await isSafeToClose(tab, rec))) return { ok: false, reason: 'That tab has unsaved input or cannot be checked, so it stays awake.' };
@@ -442,8 +455,8 @@ async function handle(req: PopupRequest): Promise<unknown> {
 
 // --- wiring -----------------------------------------------------------------
 
-chrome.runtime.onMessage.addListener((msg: PopupRequest | PageEvent, sender, sendResponse) => {
-  if (sender.id !== chrome.runtime.id) return;
+ext.runtime.onMessage.addListener((msg: PopupRequest | PageEvent, sender, sendResponse) => {
+  if (sender.id !== ext.runtime.id) return;
   if (msg.type === 'haunt:realTitle') {
     const tabId = sender.tab?.id;
     if (tabId !== undefined) {
@@ -456,12 +469,12 @@ chrome.runtime.onMessage.addListener((msg: PopupRequest | PageEvent, sender, sen
     return;
   }
   // Popup requests are only accepted from the extension's own pages.
-  if (!sender.url?.startsWith(chrome.runtime.getURL(''))) return;
+  if (!sender.url?.startsWith(ext.runtime.getURL(''))) return;
   locked(() => handle(msg)).then(sendResponse, (err) => sendResponse({ error: String(err) }));
   return true;
 });
 
-chrome.alarms.onAlarm.addListener((alarm) => {
+ext.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name !== TICK_ALARM) return;
   locked(tick);
   // Alarms fire at most every 30s. Short demo thresholds get extra ticks while the worker is awake.
@@ -471,18 +484,18 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   }
 });
 
-chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
+ext.tabs.onActivated.addListener(({ tabId, windowId }) => {
   locked(() => wake(tabId, windowId));
 });
 
-chrome.tabs.onRemoved.addListener((tabId) => {
+ext.tabs.onRemoved.addListener((tabId) => {
   locked(async () => {
     delete state.records[tabId];
     await persist();
   });
 });
 
-chrome.tabs.onReplaced.addListener((added, removed) => {
+ext.tabs.onReplaced.addListener((added, removed) => {
   locked(async () => {
     if (state.records[removed]) state.records[added] = state.records[removed];
     delete state.records[removed];
@@ -490,7 +503,7 @@ chrome.tabs.onReplaced.addListener((added, removed) => {
   });
 });
 
-chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
+ext.tabs.onUpdated.addListener((tabId, info, tab) => {
   if (!info.status && info.audible === undefined && info.pinned === undefined) return;
   locked(async () => {
     const rec = state.records[tabId];
@@ -507,19 +520,32 @@ chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
   });
 });
 
-// chrome.notifications only exists once the optional permission is granted.
+// ext.notifications only exists once the optional permission is granted.
 let whispersWired = false;
 function wireWhispers(): void {
-  if (whispersWired || !chrome.notifications) return;
+  if (whispersWired || !ext.notifications) return;
   whispersWired = true;
-  chrome.notifications.onClicked.addListener((id) => {
+  ext.notifications.onClicked.addListener((id) => {
     const match = /^whisper:(\d+):/.exec(id);
-    chrome.notifications.clear(id);
+    ext.notifications.clear(id);
     if (match) locked(() => handle({ type: 'switch', tabId: Number(match[1]) })).catch(() => {});
   });
 }
 wireWhispers();
-chrome.permissions.onAdded.addListener(wireWhispers);
 
-chrome.runtime.onInstalled.addListener(() => locked(ensureAlarm));
-chrome.runtime.onStartup.addListener(() => locked(ensureAlarm));
+const PERMISSION_PROMPT_TTL = 2 * 60_000;
+
+ext.permissions.onAdded.addListener(() => {
+  wireWhispers();
+  locked(async () => {
+    const pending = state.pendingPermission;
+    if (!pending || Date.now() - pending.at > PERMISSION_PROMPT_TTL) return;
+    const ready =
+      (!pending.settings.enabled || (await hasHostAccess())) &&
+      (!pending.settings.whispers || (await ext.permissions.contains({ permissions: ['notifications'] })));
+    if (ready) await setSettings(pending.settings);
+  });
+});
+
+ext.runtime.onInstalled.addListener(() => locked(ensureAlarm));
+ext.runtime.onStartup.addListener(() => locked(ensureAlarm));

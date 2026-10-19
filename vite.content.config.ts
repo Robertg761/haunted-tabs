@@ -4,7 +4,7 @@ import { defineConfig } from 'vite';
 export default defineConfig({
   publicDir: false,
   build: {
-    outDir: resolve(__dirname, 'dist'),
+    outDir: resolve(__dirname, 'dist/chrome'),
     emptyOutDir: false,
     target: 'chrome116',
     lib: {

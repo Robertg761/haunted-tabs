@@ -2,6 +2,7 @@ import { formatIdle, siteName } from '../shared/haunt';
 import { loadGraves, onGravesChanged, saveGraves } from '../shared/storage';
 import type { Grave } from '../shared/types';
 import { el, faviconUrl } from '../shared/ui';
+import { ext } from '../shared/ext';
 
 const gravesEl = document.getElementById('graves')!;
 const searchInput = document.getElementById('search') as HTMLInputElement;
@@ -23,7 +24,7 @@ function tombstone(g: Grave): HTMLElement {
     'article',
     { class: 'stone', 'data-id': g.id },
     el('div', { class: 'rip', text: 'R.I.P.' }),
-    el('img', { class: 'fav', src: faviconUrl(g.url), alt: '', width: '24', height: '24' }),
+    el('img', { class: 'fav', src: faviconUrl(g.url, g.favIconUrl), alt: '', width: '24', height: '24' }),
     el('h2', { class: 'name', title: g.title, text: g.title }),
     el('a', { class: 'site', href: g.url, title: g.url, target: '_blank', rel: 'noreferrer', text: siteName(g.url) }),
     el(
@@ -64,7 +65,7 @@ async function resurrect(ids: string[]): Promise<void> {
     const g = graves.find((x) => x.id === id);
     if (!g) continue;
     try {
-      await chrome.tabs.create({ url: g.url, active: false });
+      await ext.tabs.create({ url: g.url, active: false });
       raised.add(id);
     } catch (err) {
       console.warn('[haunted-tabs] could not resurrect', g.url, err);

@@ -1,4 +1,5 @@
 import { Stage } from './types';
+import { ext, hasFaviconCache } from './ext';
 
 export const STAGE_EMOJI: Record<Stage, string> = {
   [Stage.Alive]: '',
@@ -8,9 +9,20 @@ export const STAGE_EMOJI: Record<Stage, string> = {
   [Stage.Entombed]: '⚰️',
 };
 
-/** Favicon from the browser's local cache, so extension pages never hit the network. */
-export function faviconUrl(pageUrl: string): string {
-  return chrome.runtime.getURL(`/_favicon/?pageUrl=${encodeURIComponent(pageUrl)}&size=32`);
+const GENERIC_ICON =
+  'data:image/svg+xml,' +
+  encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.5" fill="none" stroke="#9a90b3" stroke-width="1.3"/><path d="M1.5 8h13M8 1.5c-3 3.5-3 9.5 0 13M8 1.5c3 3.5 3 9.5 0 13" fill="none" stroke="#9a90b3" stroke-width="1"/></svg>',
+  );
+
+/**
+ * A favicon that never touches the network. Chrome serves it from its local
+ * cache; elsewhere only icons already held as data: URLs are shown, and other
+ * pages get a plain globe.
+ */
+export function faviconUrl(pageUrl: string, iconUrl?: string): string {
+  if (hasFaviconCache()) return ext.runtime.getURL(`/_favicon/?pageUrl=${encodeURIComponent(pageUrl)}&size=32`);
+  return iconUrl?.startsWith('data:image/') ? iconUrl : GENERIC_ICON;
 }
 
 export function el<K extends keyof HTMLElementTagNameMap>(
@@ -30,12 +42,13 @@ export function el<K extends keyof HTMLElementTagNameMap>(
 }
 
 export async function openGraveyard(): Promise<void> {
-  const url = chrome.runtime.getURL('graveyard/index.html');
-  const [existing] = await chrome.tabs.query({ url });
+  const url = ext.runtime.getURL('graveyard/index.html');
+  // Filtered by hand: Firefox does not accept moz-extension:// URLs as query patterns.
+  const existing = (await ext.tabs.query({})).find((t) => t.url === url);
   if (existing?.id !== undefined) {
-    await chrome.tabs.update(existing.id, { active: true });
-    await chrome.windows.update(existing.windowId, { focused: true });
+    await ext.tabs.update(existing.id, { active: true });
+    await ext.windows.update(existing.windowId, { focused: true });
   } else {
-    await chrome.tabs.create({ url });
+    await ext.tabs.create({ url });
   }
 }

@@ -2,6 +2,7 @@
 // It only paints over the tab: it swaps the title and favicon, and can play a
 // short glitch overlay. Every change is undone by `restore()`.
 import type { PageCommand, PageEvent } from '../shared/types';
+import { ext } from '../shared/ext';
 
 declare global {
   interface Window {
@@ -50,7 +51,7 @@ function reportRealTitle(title: string): void {
   if (title === lastReportedTitle) return;
   lastReportedTitle = title;
   const event: PageEvent = { type: 'haunt:realTitle', title };
-  chrome.runtime.sendMessage(event).catch(() => {});
+  ext.runtime.sendMessage(event).catch(() => {});
 }
 
 /** Keep the haunting in place when the page itself rewrites its title or favicon. */
@@ -360,7 +361,7 @@ function trackInput(): void {
 if (!window.__hauntedTabs) {
   window.__hauntedTabs = true;
   trackInput();
-  chrome.runtime.onMessage.addListener((msg: PageCommand, _sender, sendResponse) => {
+  ext.runtime.onMessage.addListener((msg: PageCommand, _sender, sendResponse) => {
     switch (msg.type) {
       case 'haunt:ping':
         sendResponse({ ok: true, haunted });
