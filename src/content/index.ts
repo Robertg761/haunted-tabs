@@ -3,6 +3,7 @@
 // short glitch overlay. Every change is undone by `restore()`.
 import type { PageCommand, PageEvent } from '../shared/types';
 import { ext } from '../shared/ext';
+import { Cobwebs } from './cobwebs';
 
 declare global {
   interface Window {
@@ -28,6 +29,7 @@ let titleEl: HTMLTitleElement | null = null;
 let flickerTimer: number | undefined;
 let lastReportedTitle = '';
 let dirtyByInput = false;
+let cobwebs: Cobwebs | null = null;
 
 function isIconLink(node: Node): node is HTMLLinkElement {
   return (
@@ -386,6 +388,16 @@ if (!window.__hauntedTabs) {
         return;
       case 'haunt:dirty':
         sendResponse({ ok: true, dirty: hasUnsavedInput() });
+        return;
+      case 'haunt:cobwebs':
+        cobwebs ??= new Cobwebs();
+        cobwebs.add(msg.webs);
+        if (msg.growAfterMs > 0) cobwebs.arm(msg.growAfterMs);
+        sendResponse({ ok: true, webs: cobwebs.count });
+        return;
+      case 'haunt:sweep':
+        cobwebs?.sweep();
+        sendResponse({ ok: true });
         return;
     }
   });

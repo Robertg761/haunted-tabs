@@ -118,11 +118,17 @@ try {
   await advance(30 * MIN);
   await ask({ type: 'setSettings', settings: {} });
   check((await alpha.title()).startsWith('👻'), `ghost title: "${await alpha.title()}"`);
-  check((await tabTitle(`${origin}/alpha`))?.startsWith('👻'), 'tab strip shows the ghost title');
+  const stripTitle = await tabTitle(`${origin}/alpha`);
+  check(stripTitle?.startsWith('👻'), 'tab strip shows the ghost title');
   snap = await ask({ type: 'snapshot' });
   const alphaView = snap.tabs.find((t) => t.url.endsWith('/alpha'));
   check(alphaView?.title === 'Alpha page', 'popup still shows the real title');
   check(alphaView?.stage === 2, 'popup reports ghost stage');
+  const paintedRecord = await sw.evaluate(async () => (await chrome.storage.local.get('painted')).painted);
+  check(
+    paintedRecord?.[`${origin}/alpha`]?.some((e) => e.painted === stripTitle && e.real === 'Alpha page'),
+    'painted pages are remembered per tab, surviving a restart',
+  );
 
   // Discarding itself can't run here (Playwright drops the whole context when a
   // tab is discarded), but the safety check in front of it can.
@@ -168,6 +174,28 @@ try {
   check(restored, 'real title comes back after the possession');
   check(await alpha.evaluate(() => !!document.querySelector('link[href="/fav.svg"]') && !document.querySelector('link[data-haunted-tabs][rel=icon]')), 'real favicon restored');
   check(await alpha.evaluate(() => !document.querySelector('[data-haunted-tabs="glitch"]')), 'glitch overlay cleaned up');
+  const webs = () => alpha.evaluate(() => Number(document.querySelector('[data-haunted-tabs="cobwebs"]')?.dataset.webs ?? 0));
+  check((await webs()) >= 4, `a long-dead tab is full of cobwebs (${await webs()})`);
+  if (shots) await alpha.screenshot({ path: join(shots, 'cobwebs.png') });
+  for (let i = 0; i < 8; i++) {
+    await alpha.mouse.move(980, 620, { steps: 14 });
+    await alpha.mouse.move(20, 20, { steps: 14 });
+    await alpha.mouse.move(980, 20, { steps: 14 });
+    await alpha.mouse.move(20, 620, { steps: 14 });
+  }
+  const swept = await eventually(async () => (await webs()) < 4, 4000);
+  check(swept, `sweeping the mouse tears cobwebs away (${await webs()} left)`);
+  // Pinned and audible tabs must never be touched: pinning one clears its webs.
+  const alphaId = await sw.evaluate(async (url) => (await chrome.tabs.query({ url }))[0].id, `${origin}/alpha`);
+  const websBefore = await webs();
+  await sw.evaluate((id) => chrome.tabs.sendMessage(id, { type: 'haunt:cobwebs', webs: 3, growAfterMs: 60_000 }), alphaId);
+  check((await webs()) === websBefore + 3, 'webs can be laid on a tab');
+  await sw.evaluate((id) => chrome.tabs.update(id, { pinned: true }), alphaId);
+  check(
+    await eventually(() => alpha.evaluate(() => !document.querySelector('[data-haunted-tabs="cobwebs"]')), 4000),
+    'pinning a tab clears its cobwebs',
+  );
+  await sw.evaluate((id) => chrome.tabs.update(id, { pinned: false }), alphaId);
 
   // Manual close from the popup also lands in the Graveyard.
   const tickerId = await sw.evaluate(async (url) => (await chrome.tabs.query({ url }))[0].id, `${origin}/ticker`);
@@ -207,11 +235,37 @@ try {
     await sleep(800);
     await control.screenshot({ path: join(shots, 'popup.png') });
   }
+  // A frozen or hung tab can't answer during Exorcise. It must stay marked and be
+  // cleaned up once it responds, not silently left haunted. Blocking the page's
+  // main thread makes it unresponsive the same way (content scripts share it).
+  await sw.evaluate((url) => {
+    chrome.tabs.query({ url }).then(([t]) =>
+      chrome.scripting.executeScript({ target: { tabId: t.id }, world: 'MAIN', func: () => { const end = Date.now() + 7000; while (Date.now() < end); } }),
+    );
+  }, `${origin}/form`);
+  await sleep(300);
   snap = await ask({ type: 'exorcise' });
   check(snap.settings.enabled === false, 'exorcise switches haunting off');
-  check(await eventually(async () => (await form.title()) === 'Form page'), 'exorcise restores real titles');
+  check((await alpha.title()) === 'Alpha page', 'exorcise restores the tabs that can answer');
+  const pending = () =>
+    sw.evaluate(async (url) => {
+      const [t] = await chrome.tabs.query({ url });
+      const st = (await chrome.storage.session.get('hauntState')).hauntState;
+      return { marked: !!st.records[t.id]?.needsExorcise, alarm: !!(await chrome.alarms.get('haunt-tick')) };
+    }, `${origin}/form`);
+  const during = await pending();
+  check(during.marked && during.alarm, 'an unresponsive tab stays marked and the retry alarm keeps running');
+  await sleep(7000); // the page comes back
+  await ask({ type: 'setSettings', settings: {} }); // stands in for the next alarm tick
+  check(await eventually(async () => (await form.title()) === 'Form page'), 'it is restored once it responds');
+  const after = await pending();
+  check(!after.marked && !after.alarm, 'then the mark and the retry alarm are cleared');
   check((await form.inputValue('#name')) === 'half-written message', 'unsaved input is untouched');
   check(await form.evaluate(() => !document.querySelector('link[data-haunted-tabs][rel=icon]')), 'exorcise restores favicons');
+  check(
+    await eventually(() => alpha.evaluate(() => !document.querySelector('[data-haunted-tabs="cobwebs"]')), 4000),
+    'exorcise sweeps away the cobwebs',
+  );
   const badge = await sw.evaluate(() => chrome.action.getBadgeText({}));
   check(badge === '', 'badge cleared');
 } catch (err) {
