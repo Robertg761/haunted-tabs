@@ -13,6 +13,7 @@ import {
 import { loadGraves, loadSettings, saveGraves, saveSettings } from '../shared/storage';
 import {
   Stage,
+  type EffectName,
   type Grave,
   type HauntLevel,
   type PageCommand,
@@ -407,6 +408,19 @@ async function maybePoltergeist(tabs: chrome.tabs.Tab[], stages: Map<number, Sta
       return !!res?.ok;
     });
   }
+  if (settings.poltergeist && (stages.get(victim.id!) ?? 0) >= Stage.Dead) {
+    // The dead reach into the tab you are on: a passing shadow, or a second cursor.
+    for (const name of POLTERGEIST_EFFECTS) {
+      if (!settings[name]) continue;
+      events.push(async () => {
+        const [active] = await ext.tabs.query({ active: true, lastFocusedWindow: true });
+        if (!active?.id || isProtected(active) || isAsleep(active)) return false;
+        const cmd: PageCommand = { type: 'haunt:effects', effects: [name], stage: Stage.Dead, idleMs: now - rec.lastSeen, seed: rec.seed };
+        const res = await send<{ ok: boolean }>(active.id, cmd, true);
+        return !!res?.ok;
+      });
+    }
+  }
   if (settings.whispers && (await ext.permissions.contains({ permissions: ['notifications'] }))) {
     events.push(async () => {
       await ext.notifications.create(`whisper:${victim.id}:${now}`, {
@@ -430,6 +444,17 @@ const WEBS_BY_STAGE: Record<Stage, number> = {
   [Stage.Dead]: 5,
   [Stage.Entombed]: 7,
 };
+/** Page effects that greet you on return, and the stage each one starts at. */
+const STAGE_EFFECTS: [EffectName, Stage][] = [
+  ['dust', Stage.Withering],
+  ['fog', Stage.Ghost],
+  ['eyes', Stage.Dead],
+  ['drips', Stage.Entombed],
+];
+/** Effects only a poltergeist plays, on the tab you are using. */
+const POLTERGEIST_EFFECTS: EffectName[] = ['shadow', 'ghostCursor'];
+const ALL_EFFECTS: EffectName[] = [...STAGE_EFFECTS.map(([name]) => name), ...POLTERGEIST_EFFECTS];
+
 /** How long a return visit waits for a reloading tab before it is dropped. */
 const RETURN_TTL = 2 * 60_000;
 
@@ -504,6 +529,11 @@ async function returnVisit(tab: chrome.tabs.Tab, rec: TabRecord, stage: Stage, i
     if (res?.ok) rec.cobwebsArmed = true;
     delivered = !!res?.ok;
   }
+  const effects = settings.enabled ? STAGE_EFFECTS.filter(([name, from]) => settings[name] && stage >= from).map(([name]) => name) : [];
+  if (effects.length) {
+    const res = await send<{ ok: boolean }>(tabId, { type: 'haunt:effects', effects, stage, idleMs: idle, seed: rec.seed }, true);
+    delivered &&= !!res?.ok;
+  }
   if (delivered) {
     rec.pendingReturn = undefined;
     if (stage !== Stage.Alive) rec.lastReturn = { stage, idle, at: Date.now() };
@@ -567,6 +597,11 @@ async function setSettings(patch: Partial<Settings>): Promise<void> {
   }
   settings = { ...settings, ...patch };
   await saveSettings(settings);
+  const switchedOff = ALL_EFFECTS.filter((name) => patch[name] === false);
+  if (switchedOff.length) {
+    const tabs = await ext.tabs.query({});
+    await Promise.all(tabs.map((t) => send(t.id!, { type: 'haunt:stopEffects', effects: switchedOff }, false)));
+  }
   if (patch.cobwebs === false) {
     const tabs = await ext.tabs.query({});
     await Promise.all(
