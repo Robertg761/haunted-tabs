@@ -6,94 +6,267 @@
     <title>Haunted Tabs</title>
     <link rel="stylesheet" href="./popup.css" />
   </head>
-  <body>
-    <header class="top">
-      <div class="brand">
-        <span class="logo" aria-hidden="true">👻</span>
-        <div>
-          <h1>Haunted Tabs</h1>
-          <p id="level-blurb" class="blurb">Your tabs rest easy.</p>
+  <body class="dormant booting" data-level="0">
+    <div class="app" id="app">
+      <header class="top">
+        <div class="brand">
+          <svg class="logo" viewBox="0 0 48 48" aria-hidden="true">
+            <defs>
+              <radialGradient id="logo-body" cx="40%" cy="30%" r="80%">
+                <stop offset="0" stop-color="#ffffff" />
+                <stop offset=".55" stop-color="#d9fff0" />
+                <stop offset="1" stop-color="#8fdcc0" />
+              </radialGradient>
+            </defs>
+            <path class="logo-body" d="M24 5c-8.3 0-14 6.2-14 14.2V41l4.2-3.2 4.6 3.2 5.2-3.4 5.2 3.4 4.6-3.2L38 41V19.2C38 11.2 32.3 5 24 5z" fill="url(#logo-body)" />
+            <g class="logo-eyes">
+              <ellipse cx="18.6" cy="20.5" rx="2.6" ry="3.4" />
+              <ellipse cx="29.4" cy="20.5" rx="2.6" ry="3.4" />
+            </g>
+            <path class="logo-sleep" d="M15.8 21c1.6 1.4 4 1.4 5.6 0M26.6 21c1.6 1.4 4 1.4 5.6 0" />
+            <ellipse class="logo-mouth" cx="24" cy="28.5" rx="2.4" ry="2.9" />
+          </svg>
+          <div class="brand-text">
+            <h1>Haunted Tabs</h1>
+            <p id="summary" class="summary">Counting your tabs…</p>
+          </div>
         </div>
+        <label class="switch" title="Haunting is off until you turn it on">
+          <span id="enabled-label" class="switch-label">Dormant</span>
+          <input type="checkbox" id="enabled" role="switch" aria-label="Haunting" aria-describedby="enabled-label" />
+          <span class="track" aria-hidden="true"><span class="thumb"></span></span>
+        </label>
+      </header>
+
+      <div id="content" class="content">
+        <section class="level card" aria-live="polite" aria-labelledby="level-caption">
+          <div class="level-head">
+            <span id="level-caption" class="caption">Haunt level</span>
+            <span id="pips" class="pips" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+          </div>
+          <div class="level-title">
+            <strong id="level-name" class="level-name">Peaceful</strong>
+            <span id="level-blurb" class="blurb">Your tabs rest easy.</span>
+          </div>
+          <div class="meter" role="meter" id="meter" aria-label="Haunt level" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+            <div id="meter-fill" class="meter-fill"><span class="meter-ember"></span></div>
+          </div>
+          <div id="stats" class="stats"></div>
+        </section>
+
+        <section id="intro" class="intro card" hidden>
+          <div class="intro-head">
+            <span class="intro-mark" data-icon="moon"></span>
+            <div>
+              <h2>The spirits are sleeping</h2>
+              <p>Wake them with the switch, and tabs you leave alone too long begin to <em>decay</em>.</p>
+            </div>
+          </div>
+          <ol class="intro-steps" aria-label="How tabs decay">
+            <li class="s1"><span data-icon="wither"></span>Titles rot</li>
+            <li class="s2"><span data-icon="ghost"></span>Icons fade</li>
+            <li class="s3"><span data-icon="skull"></span>The dead return</li>
+          </ol>
+          <p class="fine">Nothing is ever deleted. Pinned, playing and unsaved tabs are never touched, and Exorcise restores everything at once.</p>
+        </section>
+
+        <div id="notice" class="notice" role="status" hidden></div>
+
+        <div class="toolbar">
+          <label class="search">
+            <span class="search-icon" data-icon="search"></span>
+            <input type="search" id="search" placeholder="Search tabs" aria-label="Search tabs" autocomplete="off" spellcheck="false" />
+          </label>
+          <label class="select group-select">
+            <span class="visually-hidden">Group tabs</span>
+            <select id="group" aria-label="Group tabs">
+              <option value="window">By window</option>
+              <option value="domain">By site</option>
+              <option value="idle">By decay</option>
+            </select>
+          </label>
+        </div>
+
+        <main id="list" class="list" aria-label="Open tabs"></main>
+
+        <footer class="bottom">
+          <button id="settings-toggle" class="btn icon-btn" type="button" aria-label="Settings" aria-expanded="false" aria-controls="settings" title="Settings">
+            <span data-icon="sliders"></span>
+          </button>
+          <button id="graveyard" class="btn" type="button">
+            <span data-icon="tomb"></span><span class="btn-label">Graveyard</span><span id="grave-count" class="count"></span>
+          </button>
+          <button id="exorcise" class="btn danger" type="button" title="Turn off all haunting and restore every tab">
+            <span data-icon="cross"></span><span class="btn-label">Exorcise</span>
+          </button>
+        </footer>
       </div>
-      <label class="switch" title="Haunting is off until you turn it on">
-        <input type="checkbox" id="enabled" />
-        <span class="track" aria-hidden="true"><span class="thumb"></span></span>
-        <span id="enabled-label" class="switch-label">Dormant</span>
-      </label>
-    </header>
 
-    <section class="level" aria-live="polite">
-      <div class="level-row">
-        <span>Haunt level</span>
-        <strong id="level-name">Peaceful</strong>
-      </div>
-      <div class="meter"><div id="meter-fill" class="meter-fill"></div></div>
-      <div id="stats" class="stats"></div>
-    </section>
+      <section id="settings" class="sheet" role="dialog" aria-labelledby="settings-title" hidden>
+        <div class="sheet-head">
+          <h2 id="settings-title">Settings</h2>
+          <button id="settings-close" class="icon-btn ghost-btn" type="button" aria-label="Close settings" title="Close (Esc)">
+            <span data-icon="close"></span>
+          </button>
+        </div>
+        <div class="sheet-body">
+          <section class="set-group" aria-labelledby="sg-haunting">
+            <h3 id="sg-haunting">Haunting</h3>
+            <div class="card set-card">
+              <label class="field" for="threshold">
+                <span class="field-text">
+                  <span class="opt-title">Tabs start to decay after</span>
+                  <span id="threshold-desc" class="opt-desc">Each later stage takes twice as long again.</span>
+                </span>
+                <span class="select">
+                  <select id="threshold" aria-label="Tabs start to decay after" aria-describedby="threshold-desc">
+                    <option value="0.5">30 seconds (demo)</option>
+                    <option value="1">1 minute</option>
+                    <option value="5">5 minutes</option>
+                    <option value="15">15 minutes</option>
+                    <option value="30">30 minutes</option>
+                    <option value="60">1 hour</option>
+                    <option value="120">2 hours</option>
+                    <option value="240">4 hours</option>
+                  </select>
+                </span>
+              </label>
+              <ol id="timeline" class="timeline" aria-label="Decay timeline"></ol>
+            </div>
+            <div class="card set-card opts">
+              <label class="opt">
+                <span class="opt-text">
+                  <span class="opt-title">Possession <span class="tag t3">dead</span></span>
+                  <span class="opt-desc">Dead tabs glitch your screen for a moment when you return to them.</span>
+                </span>
+                <input type="checkbox" id="possession" class="toggle-input" />
+                <span class="toggle" aria-hidden="true"></span>
+              </label>
+              <label class="opt">
+                <span class="opt-text">
+                  <span class="opt-title">Poltergeists</span>
+                  <span class="opt-desc">Rare title flickers, and the dead sometimes reach into the tab you are on.</span>
+                </span>
+                <input type="checkbox" id="poltergeist" class="toggle-input" />
+                <span class="toggle" aria-hidden="true"></span>
+              </label>
+              <label class="opt">
+                <span class="opt-text">
+                  <span class="opt-title">Cobwebs <span class="tag t1">withering+</span></span>
+                  <span class="opt-desc">Neglected pages gather cobwebs. Scroll or sweep your mouse through them to tear them away.</span>
+                </span>
+                <input type="checkbox" id="cobwebs" class="toggle-input" />
+                <span class="toggle" aria-hidden="true"></span>
+              </label>
+            </div>
+          </section>
 
-    <section id="intro" class="intro" hidden>
-      <p>
-        Turn on haunting and tabs you leave alone too long begin to <em>decay</em>. Their titles rot into eerie
-        messages, their icons wither into ghosts and skulls, and the long dead may possess your screen when you
-        come back.
-      </p>
-      <p class="fine">
-        Nothing is ever deleted. Pinned tabs, tabs playing sound, and tabs with unsaved input are never touched.
-        Exorcise restores everything at once.
-      </p>
-    </section>
+          <section class="set-group" aria-labelledby="sg-effects">
+            <h3 id="sg-effects">Page effects</h3>
+            <div class="card set-card opts">
+              <label class="opt">
+                <span class="opt-text">
+                  <span class="opt-title">Dust and decay <span class="tag t1">withering</span></span>
+                  <span class="opt-desc">Withering pages yellow, grain over and gather drifting dust.</span>
+                </span>
+                <input type="checkbox" id="dust" class="toggle-input" />
+                <span class="toggle" aria-hidden="true"></span>
+              </label>
+              <label class="opt">
+                <span class="opt-text">
+                  <span class="opt-title">Fogged glass <span class="tag t2">ghost</span></span>
+                  <span class="opt-desc">Ghost tabs mist over at the edges. Your mouse wipes the glass clear.</span>
+                </span>
+                <input type="checkbox" id="fog" class="toggle-input" />
+                <span class="toggle" aria-hidden="true"></span>
+              </label>
+              <label class="opt">
+                <span class="opt-text">
+                  <span class="opt-title">Eyes in the dark <span class="tag t3">dead</span></span>
+                  <span class="opt-desc">Something watches from an empty corner of a dead tab.</span>
+                </span>
+                <input type="checkbox" id="eyes" class="toggle-input" />
+                <span class="toggle" aria-hidden="true"></span>
+              </label>
+              <label class="opt">
+                <span class="opt-text">
+                  <span class="opt-title">Drips <span class="tag t4">entombed</span></span>
+                  <span class="opt-desc">Entombed tabs bleed from the top edge until you scroll.</span>
+                </span>
+                <input type="checkbox" id="drips" class="toggle-input" />
+                <span class="toggle" aria-hidden="true"></span>
+              </label>
+              <label class="opt needs-polt">
+                <span class="opt-text">
+                  <span class="opt-title">Passing shadow <span class="tag tp">poltergeist</span></span>
+                  <span class="opt-desc">Now and then, something moves behind the page you are reading.</span>
+                </span>
+                <input type="checkbox" id="shadow" class="toggle-input" />
+                <span class="toggle" aria-hidden="true"></span>
+              </label>
+              <label class="opt needs-polt">
+                <span class="opt-text">
+                  <span class="opt-title">Ghost cursor <span class="tag tp">poltergeist</span></span>
+                  <span class="opt-desc">Now and then, a second cursor follows yours.</span>
+                </span>
+                <input type="checkbox" id="ghostCursor" class="toggle-input" />
+                <span class="toggle" aria-hidden="true"></span>
+              </label>
+              <p class="polt-hint fine">Shadows and ghost cursors only appear while Poltergeists are on.</p>
+            </div>
+          </section>
 
-    <div id="notice" class="notice" role="status" hidden></div>
-
-    <div class="toolbar">
-      <input type="search" id="search" placeholder="Search tabs…" aria-label="Search tabs" autocomplete="off" />
-      <select id="group" aria-label="Group tabs">
-        <option value="window">By window</option>
-        <option value="domain">By site</option>
-        <option value="idle">By decay</option>
-      </select>
+          <section class="set-group" aria-labelledby="sg-memory">
+            <h3 id="sg-memory">Notifications and memory</h3>
+            <div class="card set-card opts">
+              <label class="opt">
+                <span class="opt-text">
+                  <span class="opt-title">Whispers</span>
+                  <span class="opt-desc">Notifications about forgotten tabs. Asks for notification permission.</span>
+                </span>
+                <input type="checkbox" id="whispers" class="toggle-input" />
+                <span class="toggle" aria-hidden="true"></span>
+              </label>
+              <label class="opt">
+                <span class="opt-text">
+                  <span class="opt-title">Put ghosts to sleep <span class="tag t2">ghost</span></span>
+                  <span class="opt-desc">Discard ghost tabs to free memory. They reload when you visit.</span>
+                </span>
+                <input type="checkbox" id="autoDiscard" class="toggle-input" />
+                <span class="toggle" aria-hidden="true"></span>
+              </label>
+              <label class="opt">
+                <span class="opt-text">
+                  <span class="opt-title">Bury the entombed <span class="tag t4">entombed</span></span>
+                  <span class="opt-desc">Close tabs that reach the grave and keep them in the Graveyard.</span>
+                </span>
+                <input type="checkbox" id="autoBury" class="toggle-input" />
+                <span class="toggle" aria-hidden="true"></span>
+              </label>
+            </div>
+          </section>
+          <p class="sheet-foot fine">Everything here is reversible. Exorcise restores every tab at once.</p>
+        </div>
+      </section>
     </div>
 
-    <main id="list" class="list"></main>
+    <div id="awaken" class="awaken" aria-hidden="true"></div>
 
-    <details id="settings" class="settings">
-      <summary>Settings</summary>
-      <label class="field">
-        <span>Tabs start to decay after</span>
-        <select id="threshold">
-          <option value="0.5">30 seconds (demo)</option>
-          <option value="1">1 minute</option>
-          <option value="5">5 minutes</option>
-          <option value="15">15 minutes</option>
-          <option value="30">30 minutes</option>
-          <option value="60">1 hour</option>
-          <option value="120">2 hours</option>
-          <option value="240">4 hours</option>
-        </select>
-      </label>
-      <p id="timeline" class="fine timeline"></p>
-      <label class="check"><input type="checkbox" id="possession" /> <span><b>Possession.</b> Dead tabs glitch your screen for a moment when you return to them.</span></label>
-      <label class="check"><input type="checkbox" id="poltergeist" /> <span><b>Poltergeists.</b> Rare title flickers, and the dead sometimes reach into the tab you are on.</span></label>
-      <label class="check"><input type="checkbox" id="cobwebs" /> <span><b>Cobwebs.</b> Neglected pages gather cobwebs. Scroll or sweep your mouse through them to tear them away.</span></label>
-      <p class="subhead">Page effects</p>
-      <label class="check"><input type="checkbox" id="dust" /> <span><b>Dust and decay.</b> Withering pages yellow, grain over and gather drifting dust.</span></label>
-      <label class="check"><input type="checkbox" id="fog" /> <span><b>Fogged glass.</b> Ghost tabs mist over at the edges. Your mouse wipes the glass clear.</span></label>
-      <label class="check"><input type="checkbox" id="eyes" /> <span><b>Eyes in the dark.</b> Something watches from an empty corner of a dead tab.</span></label>
-      <label class="check"><input type="checkbox" id="drips" /> <span><b>Drips.</b> Entombed tabs bleed from the top edge until you scroll.</span></label>
-      <label class="check"><input type="checkbox" id="shadow" /> <span><b>Passing shadow.</b> Now and then, something moves behind the page you are reading.</span></label>
-      <label class="check"><input type="checkbox" id="ghostCursor" /> <span><b>Ghost cursor.</b> Now and then, a second cursor follows yours.</span></label>
-      <p class="subhead">Notifications and memory</p>
-      <label class="check"><input type="checkbox" id="whispers" /> <span><b>Whispers.</b> Notifications about forgotten tabs. Asks for notification permission.</span></label>
-      <label class="check"><input type="checkbox" id="autoDiscard" /> <span><b>Put ghosts to sleep.</b> Discard ghost tabs to free memory. They reload when you visit.</span></label>
-      <label class="check"><input type="checkbox" id="autoBury" /> <span><b>Bury the entombed.</b> Close tabs that reach the grave and keep them in the Graveyard.</span></label>
-    </details>
+    <div id="banish" class="banish" hidden aria-hidden="true">
+      <div class="banish-light"></div>
+      <svg class="sigil" viewBox="0 0 200 200">
+        <path class="sigil-ring r1" pathLength="1" d="M100 22a78 78 0 1 1 0 156a78 78 0 1 1 0-156" />
+        <path class="sigil-ring r2" pathLength="1" d="M100 36a64 64 0 1 0 0 128a64 64 0 1 0 0-128" />
+        <path class="star" pathLength="1" d="M100 36 137.6 151.8 39.1 80.2H160.9L62.4 151.8Z" />
+        <path class="holy" d="M100 70v62M84 90h32" />
+      </svg>
+      <div class="wisps">
+        <i data-icon="ghost"></i><i data-icon="ghost"></i><i data-icon="ghost"></i><i data-icon="ghost"></i><i data-icon="ghost"></i>
+      </div>
+      <p>The spirits have been banished.</p>
+    </div>
 
-    <footer class="bottom">
-      <button id="graveyard" class="btn">🪦 Graveyard <span id="grave-count" class="count"></span></button>
-      <button id="exorcise" class="btn danger" title="Turn off all haunting and restore every tab">✝ Exorcise</button>
-    </footer>
-
-    <div id="banish" class="banish" hidden><span>✝</span><p>The spirits have been banished.</p></div>
+    <div id="sr-live" class="visually-hidden" role="status" aria-live="polite"></div>
 
     <script type="module" src="./popup.ts"></script>
   </body>
