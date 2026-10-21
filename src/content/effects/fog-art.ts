@@ -220,11 +220,13 @@ export function fogTextureJob(o: TextureOptions): { canvas: HTMLCanvasElement; s
       }
     }
   };
-  // Upscale in horizontal bands (clipped, so no seams) to keep each step short.
+  // Upscale in horizontal bands to keep each step short. Band edges are whole pixels that meet
+  // exactly: an overlapping row would be painted twice and show as a faint line across the fog.
   const band = (from: number, to: number, paint: () => void) => () => {
+    const y0 = Math.round(h * from);
     g.save();
     g.beginPath();
-    g.rect(0, Math.floor(h * from), w, Math.ceil(h * (to - from)) + 1);
+    g.rect(0, y0, w, Math.round(h * to) - y0);
     g.clip();
     paint();
     g.restore();

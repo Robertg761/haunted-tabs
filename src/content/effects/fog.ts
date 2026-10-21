@@ -53,6 +53,8 @@ const CENTRE = [0, 0, 0.035, 0.09, 0.14];
 const TOP_BAND = 64;
 const TOP_FEATHER = 64;
 const RIME_LINE = 6;
+/** How far down (CSS px) the band's lower edge may wander. */
+const TOP_WANDER = 48;
 
 /** The most fog allowed at height y (CSS px) for a page whose band cap is `cap`. */
 function topCap(y: number, cap: number): number {
@@ -154,6 +156,9 @@ export class Fog implements Effect {
   private resizeTimer: number | undefined;
   private texTimer: number | undefined;
   private jobTimer: number | undefined;
+  private themeTimer: number | undefined;
+  private themeObserver: MutationObserver | null = null;
+  private scheme: MediaQueryList | null = null;
   private jobId = 0;
   private tilesPending = false;
   private rimCount = new Int32Array(0);
@@ -265,6 +270,13 @@ export class Fog implements Effect {
     addEventListener('resize', this.onResize, { passive: true });
     document.addEventListener('visibilitychange', this.onVisibility);
     this.visible = document.visibilityState === 'visible';
+    // Follow the page if it switches between light and dark: pale fog on a page gone dark would bury its text.
+    this.themeObserver = new MutationObserver(this.onTheme);
+    const themeOpts = { attributes: true, attributeFilter: ['class', 'style', 'data-theme', 'data-color-mode', 'data-bs-theme'] };
+    this.themeObserver.observe(document.documentElement, themeOpts);
+    if (document.body) this.themeObserver.observe(document.body, themeOpts);
+    this.scheme = matchMedia('(prefers-color-scheme: dark)');
+    this.scheme.addEventListener('change', this.onTheme);
 
     // Left alone, the glass slowly warms up and the fog lifts by itself within a couple of minutes.
     this.ambientTimer = window.setInterval(() => {
@@ -295,8 +307,13 @@ export class Fog implements Effect {
     clearTimeout(this.resizeTimer);
     clearTimeout(this.texTimer);
     clearTimeout(this.jobTimer);
+    clearTimeout(this.themeTimer);
     clearInterval(this.ambientTimer);
-    this.stopTimer = this.appTimer = this.resizeTimer = this.texTimer = this.jobTimer = this.ambientTimer = undefined;
+    this.stopTimer = this.appTimer = this.resizeTimer = this.texTimer = this.jobTimer = this.ambientTimer = this.themeTimer = undefined;
+    this.themeObserver?.disconnect();
+    this.themeObserver = null;
+    this.scheme?.removeEventListener('change', this.onTheme);
+    this.scheme = null;
     this.jobId++;
     removeEventListener('pointermove', this.onPointer);
     removeEventListener('pointerdown', this.onWork);
@@ -466,8 +483,12 @@ export class Fog implements Effect {
           const py = (y + 0.5) * cell;
           const ny = Math.max(0.004, Math.min(py / reachTop, (vh - py) / reachBottom));
           const ay = 1 / (ny * ny);
-          const capY = Math.min(cap, topCap(py, look.topCap));
+          const capRow = Math.min(cap, topCap(py, look.topCap));
+          const nearTop = py > TOP_BAND && py < TOP_BAND + TOP_FEATHER + TOP_WANDER;
           for (let x = 0, i = y * cols; x < cols; x++, i++) {
+            // The lower edge of the clearer top band wanders, and only ever downwards (the header
+            // keeps its contrast): a ruler-straight line across a colourful page reads as a seam.
+            const capY = nearTop ? Math.min(cap, topCap(Math.max(TOP_BAND, py - TOP_WANDER * clamp01((mid[i] - 0.2) / 0.6)), look.topCap)) : capRow;
             const px = (x + 0.5) * cell;
             const nx = Math.max(0.004, Math.min(px, vw - px) / reachSide);
             // Distance to the frame in units of reach, rounded off at the corners; corners also reach further in.
@@ -642,6 +663,21 @@ export class Fog implements Effect {
       this.build(true);
       this.wake();
     }, 250);
+  };
+
+  private onTheme = (): void => {
+    // At most a few checks a second, however busily the page rewrites its classes.
+    if (this.themeTimer !== undefined || !this.overlay) return;
+    this.themeTimer = window.setTimeout(() => {
+      this.themeTimer = undefined;
+      if (!this.overlay || this.stopping) return;
+      const look = pickLook();
+      if (look.palette.dark === this.look!.palette.dark) return;
+      // Same wiped state and water, redrawn in the new page's colours.
+      this.look = look;
+      this.build(true);
+      this.wake();
+    }, 300);
   };
 
   private onVisibility = (): void => {
