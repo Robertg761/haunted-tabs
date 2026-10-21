@@ -54,6 +54,10 @@ const WIPE_GESTURE = 0.9;
 /** Probe grid for text: column width and vertical step, in CSS px. */
 const PROBE_BIN = 12;
 const PROBE_STEP = 24;
+/** Frame rate while only slow things change (trails drying, the film seeping in, the band settling). */
+const CALM_FPS = 15;
+/** Seconds for a drip stranded over text by a resize to evaporate. */
+const EVAPORATE_S = 0.9;
 /** Debug: use WebGL even when it is software-rendered. Keep false in builds. */
 const FORCE_GL = false;
 
@@ -62,6 +66,11 @@ const GATHERING = 1;
 const RUNNING = 2;
 const POOLING = 3;
 const RESTING = 4;
+
+/** What the next frame needs: nothing, a calm frame soon, or a full-rate frame. */
+const IDLE = 0;
+const CALM = 1;
+const LIVELY = 2;
 
 /** Whether this machine gives us hardware WebGL; probed once per page. */
 let glVerdict: boolean | null = null;
@@ -102,6 +111,9 @@ interface Drip {
   stretch: number;
   /** Seconds the head has been held by surface tension. */
   stuck: number;
+  /** 1 while present; falls to 0 as a drip left over text by a resize evaporates. */
+  gone: number;
+  doomed: boolean;
 }
 
 interface Bit {
@@ -316,8 +328,15 @@ export class Drips implements Effect {
   private t = 0;
   private last = 0;
   private raf = 0;
+  /** A calm frame is waiting on this timer (see CALM_FPS). */
+  private calmTimer: number | undefined;
   private timer: number | undefined;
   private resizeTimer: number | undefined;
+  private themeTimer: number | undefined;
+  private themeObserver: MutationObserver | null = null;
+  private scheme: MediaQueryList | null = null;
+  /** Page darkness to ease towards, when the page changes theme while it bleeds. */
+  private darkTarget = 0;
   private stopping = false;
   private opacity = 0;
   /** 1 = full; dips while you scroll gently, and recovers. */
@@ -354,6 +373,8 @@ export class Drips implements Effect {
   private idle = 0;
   private idleIsTimeout = false;
   private wantDrips = 0;
+  /** The layout changed under the drips: check them against the new text columns. */
+  private recheck = false;
   private glPending = false;
 
   get active(): boolean {
@@ -387,7 +408,7 @@ export class Drips implements Effect {
     this.rng = seeded(this.seed ^ 0x9e3779b9);
     const shape = seeded(this.seed ^ 0x5eed);
     for (let i = 0; i < this.bandPhase.length; i++) this.bandPhase[i] = shape() * Math.PI * 2;
-    this.dark = pageDarkness();
+    this.dark = this.darkTarget = pageDarkness();
     this.overlay = createOverlay(this.name, 'canvas { position: absolute; inset: 0; width: 100%; height: 100%; }');
     // Creating a WebGL context can take tens of ms when it fails: the first time,
     // start on the CPU renderer and try WebGL in idle time (see scanSlice).
@@ -398,6 +419,7 @@ export class Drips implements Effect {
     this.poolBase = new Float32Array(0);
     this.drips = [];
     this.veto = null;
+    this.recheck = false;
     this.measure();
     this.t = 0;
     this.opacity = 0;
@@ -430,6 +452,7 @@ export class Drips implements Effect {
     addEventListener('pointermove', this.onPointer, { passive: true });
     addEventListener('resize', this.onResize, { passive: true });
     document.addEventListener('visibilitychange', this.onVisibility);
+    this.watchTheme();
     this.wake();
   }
 
@@ -449,7 +472,13 @@ export class Drips implements Effect {
     clearTimeout(this.timer);
     this.timer = undefined;
     clearTimeout(this.resizeTimer);
-    this.resizeTimer = undefined;
+    clearTimeout(this.calmTimer);
+    clearTimeout(this.themeTimer);
+    this.resizeTimer = this.calmTimer = this.themeTimer = undefined;
+    this.themeObserver?.disconnect();
+    this.themeObserver = null;
+    this.scheme?.removeEventListener('change', this.onTheme);
+    this.scheme = null;
     this.cancelScan();
     if (this.raf) cancelAnimationFrame(this.raf);
     this.raf = 0;
@@ -622,8 +651,15 @@ export class Drips implements Effect {
           d.trail[i * 4 + 1] = Math.min(d.trail[i * 4 + 1], H);
         }
       }
-      // Columns were measured for the old layout.
-      if (this.veto && Math.abs(oldW - W) > PROBE_BIN) this.veto = null;
+      // Columns were measured for the old layout: probe again, and let any drip now over text go.
+      if (this.veto && Math.abs(oldW - W) > PROBE_BIN) {
+        this.veto = null;
+        this.recheck = true;
+        if (!this.idle) {
+          this.scanRaw = null;
+          this.scheduleScan();
+        }
+      }
     }
 
     const canvas = this.canvas!;
@@ -688,9 +724,22 @@ export class Drips implements Effect {
       return;
     }
     this.veto = this.dilate(this.scanRaw);
-    const want = Math.min(MAX_DRIPS - this.drips.length, this.wantDrips);
+    let span = 17.5;
+    if (this.recheck) {
+      // After a resize: drips stranded over text evaporate, and as many new ones form in clear columns.
+      this.recheck = false;
+      span = 6;
+      for (const d of this.drips) {
+        if (d.doomed || d.x0 < 12 || d.x0 > this.W - 12) continue;
+        if (this.veto[Math.min(this.veto.length - 1, Math.max(0, Math.floor(d.x0 / PROBE_BIN)))]) {
+          d.doomed = true;
+          if (!this.stopping && !this.wiping) this.wantDrips++;
+        }
+      }
+    }
+    const want = Math.min(MAX_DRIPS - this.drips.filter((d) => !d.doomed).length, this.wantDrips);
     this.wantDrips = 0;
-    this.addDrips(want, Math.max(1.3, this.t + 0.3), 17.5);
+    this.addDrips(want, Math.max(1.3, this.t + 0.3), span);
     this.wake();
   };
 
@@ -778,7 +827,7 @@ export class Drips implements Effect {
     const slots: number[] = [];
     // Room for a drip every ~24 px (heads are ~20 px wide, and neighbours start at different times).
     const minGap = Math.max(24, Math.min(36, W / 48));
-    const taken = this.drips.map((d) => d.x0);
+    const taken = this.drips.filter((d) => !d.doomed).map((d) => d.x0);
     let b = 0;
     while (b < veto.length) {
       if (veto[b]) {
@@ -847,7 +896,7 @@ export class Drips implements Effect {
       if (prev !== undefined && at < prev + 5) at = prev + 5 + rng() * 2;
       lastAt.set(key, at);
       let lead: Drip | undefined;
-      for (const d of this.drips) if (Math.abs(d.x0 - x) < 2) lead = lead ?? d;
+      for (const d of this.drips) if (!d.doomed && Math.abs(d.x0 - x) < 2) lead = lead ?? d;
       if (lead) at = Math.max(at, lead.at + 5 + rng() * 2);
       this.drips.push({
         phase: WAITING,
@@ -882,6 +931,8 @@ export class Drips implements Effect {
         bumpW: 9 + r0 * 1.5,
         stretch: 0,
         stuck: 0,
+        gone: 1,
+        doomed: false,
       });
     }
     let end = 0;
@@ -946,10 +997,35 @@ export class Drips implements Effect {
 
   private onVisibility = () => {
     if (document.visibilityState === 'visible') this.wake();
-    else if (this.raf) {
-      cancelAnimationFrame(this.raf);
+    else {
+      if (this.raf) cancelAnimationFrame(this.raf);
       this.raf = 0;
+      clearTimeout(this.calmTimer);
+      this.calmTimer = undefined;
     }
+  };
+
+  /** Follow the page if it switches between light and dark while it bleeds. */
+  private watchTheme(): void {
+    this.themeObserver = new MutationObserver(this.onTheme);
+    const opts = { attributes: true, attributeFilter: ['class', 'style', 'data-theme', 'data-color-mode', 'data-bs-theme'] };
+    this.themeObserver.observe(document.documentElement, opts);
+    if (document.body) this.themeObserver.observe(document.body, opts);
+    this.scheme = matchMedia('(prefers-color-scheme: dark)');
+    this.scheme.addEventListener('change', this.onTheme);
+  }
+
+  private onTheme = () => {
+    // At most a few checks a second, however busily the page rewrites its classes.
+    if (this.themeTimer !== undefined || !this.overlay) return;
+    this.themeTimer = window.setTimeout(() => {
+      this.themeTimer = undefined;
+      if (!this.overlay) return;
+      const dark = pageDarkness();
+      if (Math.abs(dark - this.darkTarget) < 0.05) return;
+      this.darkTarget = dark;
+      this.wake();
+    }, 300);
   };
 
   private onContextLost = (e: Event) => {
@@ -967,10 +1043,20 @@ export class Drips implements Effect {
   };
 
   private wake(): void {
+    // Cut a calm wait short: the clock keeps running from the last frame.
+    const waiting = this.calmTimer !== undefined;
+    clearTimeout(this.calmTimer);
+    this.calmTimer = undefined;
     if (this.raf || !this.overlay || document.visibilityState !== 'visible') return;
-    this.last = performance.now();
+    if (!waiting) this.last = performance.now();
     this.raf = requestAnimationFrame(this.frame);
   }
+
+  private calmFrame = () => {
+    this.calmTimer = undefined;
+    if (this.raf || !this.overlay || document.visibilityState !== 'visible') return;
+    this.raf = requestAnimationFrame(this.frame);
+  };
 
   // --- simulation ------------------------------------------------------------
 
@@ -979,30 +1065,40 @@ export class Drips implements Effect {
     if (!this.overlay) return;
     const dt = Math.min(0.1, Math.max(0, (now - this.last) / 1000));
     this.last = now;
-    const busy = this.step(dt);
+    const pace = this.step(dt);
     if (!this.overlay) return; // wiped away or faded out during the step
     this.rasterize();
     this.present();
-    if (busy) this.raf = requestAnimationFrame(this.frame);
+    // Running drips, ripples and fades get every frame; drying and seeping only a few a second.
+    if (pace === LIVELY) this.raf = requestAnimationFrame(this.frame);
+    else if (pace === CALM) this.calmTimer = window.setTimeout(this.calmFrame, 1000 / CALM_FPS - 6);
   };
 
-  /** Advance everything by dt seconds. Returns whether anything is still changing. */
-  private step(dt: number): boolean {
+  /** Advance everything by dt seconds. Returns how soon the next frame is needed (IDLE, CALM, LIVELY). */
+  private step(dt: number): number {
     this.t += dt;
     const t = this.t;
+    // busy: anything still changing at all; lively: changing fast enough to need every frame.
     let busy = this.idle !== 0;
+    let lively = this.pendingScroll !== 0;
 
     // Fades.
     if (this.stopping) {
       this.opacity = Math.max(0, this.opacity - dt / FADE_OUT_S);
       if (this.opacity <= 0) {
         this.destroy();
-        return false;
+        return IDLE;
       }
-      busy = true;
+      lively = true;
     } else if (this.opacity < 1) {
       this.opacity = Math.min(1, this.opacity + dt / 0.9);
-      busy = true;
+      lively = true;
+    }
+    if (this.dark !== this.darkTarget) {
+      // The page changed theme: ease the look over rather than snapping it.
+      const k = dt / 0.6;
+      this.dark = Math.abs(this.darkTarget - this.dark) <= k ? this.darkTarget : this.dark + Math.sign(this.darkTarget - this.dark) * k;
+      lively = true;
     }
 
     this.handleScroll(dt);
@@ -1010,27 +1106,40 @@ export class Drips implements Effect {
       this.wipeT += dt;
       if (this.wipeT >= (this.reduced ? 1.3 : WIPE_S)) {
         this.destroy();
-        return false;
+        return IDLE;
       }
-      busy = true;
+      lively = true;
     }
     this.wet += (this.wetTarget - this.wet) * (1 - Math.exp(-dt / 0.4));
-    if (Math.abs(this.wet - this.wetTarget) > 0.002 || this.wetTarget < 0.999) busy = true;
+    if (Math.abs(this.wet - this.wetTarget) > 0.02) lively = true;
+    else if (Math.abs(this.wet - this.wetTarget) > 0.002 || this.wetTarget < 0.999) busy = true;
     if (this.sag > 0.05) {
       this.sag *= Math.exp(-dt / 0.6);
-      busy = true;
+      lively = true;
     } else this.sag = 0;
 
     // Is a drip still doing something? (A stop or a wipe freezes the schedule.)
     const frozen = this.stopping || this.wiping;
     let live = false;
+    let gone = false;
     for (const d of this.drips) {
+      if (d.doomed) {
+        // Left over text by a resize: it thins and evaporates where it is.
+        d.gone = Math.max(0, d.gone - dt / EVAPORATE_S);
+        d.bump *= Math.exp(-dt * 3);
+        if (d.gone <= 0) gone = true;
+        lively = true;
+        continue;
+      }
       if (this.wiping && !this.reduced) {
         this.streak(d, dt);
       } else if (d.phase === RESTING) {
         if (t - d.lastDeposit < TRAIL_TAU * 2) busy = true;
       } else if (!(frozen && (d.phase === WAITING || d.phase === GATHERING))) {
         live = true;
+        // A drip waiting its turn only sags the meniscus a little; the rest move.
+        if (d.phase === WAITING) busy = true;
+        else lively = true;
         this.stepDrip(d, dt);
       }
       // Mouse nearby: the head trembles, as if breath touched it.
@@ -1040,9 +1149,10 @@ export class Drips implements Effect {
         if (dist < 110) target = Math.sin(t * 7.3 + d.wobP) * 2.4 * (1 - dist / 110);
       }
       d.waver += (target - d.waver) * Math.min(1, dt * 6);
-      if (Math.abs(d.waver) > 0.03) busy = true;
+      if (Math.abs(d.waver) > 0.03) lively = true;
     }
-    if (t < this.stirUntil) busy = true;
+    if (gone) this.drips = this.drips.filter((d) => d.gone > 0);
+    if (t < this.stirUntil) lively = true;
     if (live || t < this.endT) busy = true;
 
     // Band drift slows to a stop once nothing is flowing.
@@ -1050,10 +1160,12 @@ export class Drips implements Effect {
     this.bandT += dt * this.act;
     if (this.act > 0.01) busy = true;
 
-    if (this.stepBits(dt)) busy = true;
-    if (this.stepPool(dt)) busy = true;
+    if (this.stepBits(dt)) lively = true;
+    const pool = this.stepPool(dt);
+    if (pool === LIVELY) lively = true;
+    else if (pool === CALM) busy = true;
     this.computeBand();
-    return busy;
+    return lively ? LIVELY : busy ? CALM : IDLE;
   }
 
   private handleScroll(dt: number): void {
@@ -1096,6 +1208,12 @@ export class Drips implements Effect {
         // Dragged up: it slides back a little over its own trail, leaving nothing new.
         d.y = Math.max(this.bandDepthAt(d.x) * 0.6, d.y + kick * 0.4);
         d.lastY = Math.min(d.lastY, d.y);
+        // Taking the end of the trail with it: a trail never pokes out below its own head.
+        // (A pooling head sits on the pool, and its trail runs into it.)
+        if (d.phase !== POOLING) {
+          const end = d.y - Math.sqrt(Math.max(0, d.m) / Math.PI) * 0.2;
+          while (d.n > 2 && d.trail[(d.n - 1) * 4 + 1] > end) d.n--;
+        }
       }
     }
     for (const b of this.drops) if (b.alive) b.y += g;
@@ -1356,12 +1474,11 @@ export class Drips implements Effect {
     return h0 + (h1 - h0) * a;
   }
 
-  private stepPool(dt: number): boolean {
+  private stepPool(dt: number): number {
     const base = this.poolBase;
     const u = this.poolU;
     const v = this.poolV;
     const n = base.length;
-    let busy = false;
     // A thin film: it spreads quickly, and seeps in evenly while the tab bleeds.
     const seep = this.t < this.endT ? smooth(4, 24, this.t) * 3.2 * this.S : 0;
     const steps = Math.max(1, Math.ceil(dt * 60 - 0.01));
@@ -1403,15 +1520,17 @@ export class Drips implements Effect {
       u[0] = u[1];
       u[n - 1] = u[n - 2];
     }
-    if (this.t - this.lastPoolAdd < 6 || seep) busy = true;
+    let pace = this.t - this.lastPoolAdd < 6 || seep ? CALM : IDLE;
     let energy = 0;
     for (let j = 1; j < n - 1; j++) energy = Math.max(energy, Math.abs(u[j]), Math.abs(v[j]) * 0.1);
-    if (energy > 0.02) busy = true;
+    // Ripples you can see need every frame; the last faint swell can settle at the calm rate.
+    if (energy > 0.3) pace = LIVELY;
+    else if (energy > 0.02) pace = Math.max(pace, CALM);
     else if (energy > 0) {
       u.fill(0);
       v.fill(0);
     }
-    return busy;
+    return pace;
   }
 
   // --- meniscus --------------------------------------------------------------
@@ -1472,15 +1591,17 @@ export class Drips implements Effect {
     const k = 0.85 + 0.15 * this.wet;
     for (const d of this.drips) {
       if (d.phase === WAITING) continue;
-      if (d.n > 0) this.trailField(d, k, t);
+      // An evaporating drip thins out evenly until it falls below the surface threshold.
+      const kd = d.gone < 1 ? k * d.gone * (2 - d.gone) : k;
+      if (d.n > 0) this.trailField(d, kd, t);
       if (d.m > 1) {
         const rv = Math.min(16, Math.sqrt(d.m / Math.PI));
         const x = d.x + d.waver;
         const s = d.stretch;
         // A teardrop pressed to the glass: heaviest at the bottom, drawn out as it runs.
-        this.blob(x, d.y + rv * 0.2 * s, rv * (1 - 0.1 * s), rv * (1 + 0.22 * s), 0.95 * k);
-        this.blob(x, d.y - rv * (0.55 + 0.45 * s), rv * 0.72, rv * (0.8 + 0.3 * s), 0.6 * k);
-        this.blob(x, d.y - rv * (1.15 + 0.8 * s), rv * 0.45, rv * (0.6 + 0.4 * s), 0.55 * k);
+        this.blob(x, d.y + rv * 0.2 * s, rv * (1 - 0.1 * s), rv * (1 + 0.22 * s), 0.95 * kd);
+        this.blob(x, d.y - rv * (0.55 + 0.45 * s), rv * 0.72, rv * (0.8 + 0.3 * s), 0.6 * kd);
+        this.blob(x, d.y - rv * (1.15 + 0.8 * s), rv * 0.45, rv * (0.6 + 0.4 * s), 0.55 * kd);
       }
     }
     for (const b of this.drops) {

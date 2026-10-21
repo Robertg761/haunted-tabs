@@ -154,6 +154,9 @@ export class Fog implements Effect {
   private resizeTimer: number | undefined;
   private texTimer: number | undefined;
   private jobTimer: number | undefined;
+  private themeTimer: number | undefined;
+  private themeObserver: MutationObserver | null = null;
+  private scheme: MediaQueryList | null = null;
   private jobId = 0;
   private tilesPending = false;
   private rimCount = new Int32Array(0);
@@ -265,6 +268,13 @@ export class Fog implements Effect {
     addEventListener('resize', this.onResize, { passive: true });
     document.addEventListener('visibilitychange', this.onVisibility);
     this.visible = document.visibilityState === 'visible';
+    // Follow the page if it switches between light and dark: pale fog on a page gone dark would bury its text.
+    this.themeObserver = new MutationObserver(this.onTheme);
+    const themeOpts = { attributes: true, attributeFilter: ['class', 'style', 'data-theme', 'data-color-mode', 'data-bs-theme'] };
+    this.themeObserver.observe(document.documentElement, themeOpts);
+    if (document.body) this.themeObserver.observe(document.body, themeOpts);
+    this.scheme = matchMedia('(prefers-color-scheme: dark)');
+    this.scheme.addEventListener('change', this.onTheme);
 
     // Left alone, the glass slowly warms up and the fog lifts by itself within a couple of minutes.
     this.ambientTimer = window.setInterval(() => {
@@ -295,8 +305,13 @@ export class Fog implements Effect {
     clearTimeout(this.resizeTimer);
     clearTimeout(this.texTimer);
     clearTimeout(this.jobTimer);
+    clearTimeout(this.themeTimer);
     clearInterval(this.ambientTimer);
-    this.stopTimer = this.appTimer = this.resizeTimer = this.texTimer = this.jobTimer = this.ambientTimer = undefined;
+    this.stopTimer = this.appTimer = this.resizeTimer = this.texTimer = this.jobTimer = this.ambientTimer = this.themeTimer = undefined;
+    this.themeObserver?.disconnect();
+    this.themeObserver = null;
+    this.scheme?.removeEventListener('change', this.onTheme);
+    this.scheme = null;
     this.jobId++;
     removeEventListener('pointermove', this.onPointer);
     removeEventListener('pointerdown', this.onWork);
@@ -642,6 +657,21 @@ export class Fog implements Effect {
       this.build(true);
       this.wake();
     }, 250);
+  };
+
+  private onTheme = (): void => {
+    // At most a few checks a second, however busily the page rewrites its classes.
+    if (this.themeTimer !== undefined || !this.overlay) return;
+    this.themeTimer = window.setTimeout(() => {
+      this.themeTimer = undefined;
+      if (!this.overlay || this.stopping) return;
+      const look = pickLook();
+      if (look.palette.dark === this.look!.palette.dark) return;
+      // Same wiped state and water, redrawn in the new page's colours.
+      this.look = look;
+      this.build(true);
+      this.wake();
+    }, 300);
   };
 
   private onVisibility = (): void => {
