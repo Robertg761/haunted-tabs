@@ -43,7 +43,7 @@ import {
   strokeStyles,
 } from './cobwebs-art';
 import { Spider, dropSpiderSprites, type SpiderWorld } from './cobwebs-spider';
-import { HOST_CSS, Z, createHost } from './effects/overlay';
+import { HOST_CSS, Z, attachHost, createHost } from './effects/overlay';
 
 interface Dew {
   s: Strand;
@@ -253,6 +253,14 @@ export class Cobwebs {
     }, 2500);
   }
 
+  /** Remove everything at once, without the fall: listeners, timers, the overlay. */
+  destroy(): void {
+    this.growAfterMs = 0;
+    if (this.growTimer !== undefined) clearInterval(this.growTimer);
+    this.growTimer = undefined;
+    this.teardown();
+  }
+
   /** Fewer webs on a small window: eight fill a big screen, four a phone-sized one. */
   private maxWebs(): number {
     const area = (innerWidth * innerHeight) / (1280 * 800);
@@ -288,7 +296,7 @@ export class Cobwebs {
         const d = Math.hypot(w.cx - x, w.cy - y);
         if (d < keep) score += 2 * (1 - d / keep);
       }
-      if (score < bestScore && score < 2) score += this.overText(x, y) * 0.6;
+      if (score < bestScore && score < 2) score += this.overText(x, y, R * 0.6) * 1.2;
       if (score < bestScore) {
         bestScore = score;
         best = { x, y };
@@ -297,12 +305,27 @@ export class Cobwebs {
     return best;
   }
 
-  /** 1 if the point is over reading matter (text, links, controls), else 0. */
-  private overText(x: number, y: number): number {
+  /** How much of a web around (x, y) would cover reading matter, 0..1: its hub and six points around it. */
+  private overText(x: number, y: number, r: number): number {
+    let hits = 0;
+    for (let i = 0; i < 7; i++) {
+      const a = (i / 6) * TAU;
+      hits += i ? this.textAt(x + Math.cos(a) * r, y + Math.sin(a) * r) : this.textAt(x, y);
+    }
+    return hits / 7;
+  }
+
+  /** 1 if the point is over reading matter (text, links, controls, video), else 0. */
+  private textAt(x: number, y: number): number {
     try {
       let el = document.elementFromPoint(x, y);
       for (let i = 0; el && i < 3; i++, el = el.parentElement) {
-        if (/^(P|H[1-6]|LI|A|BUTTON|LABEL|INPUT|TEXTAREA|SELECT|TD|TH|PRE|CODE|BLOCKQUOTE|FIGCAPTION|DT|DD)$/.test(el.tagName)) return 1;
+        if (/^(P|H[1-6]|LI|A|BUTTON|LABEL|INPUT|TEXTAREA|SELECT|TD|TH|PRE|CODE|BLOCKQUOTE|FIGCAPTION|DT|DD|VIDEO|IFRAME)$/.test(el.tagName)) return 1;
+        // Text set straight into a box of its own, as app UIs do with divs and spans.
+        if (i === 0 && Array.from(el.childNodes).some((n) => n.nodeType === 3 && n.textContent!.trim())) {
+          const r = el.getBoundingClientRect();
+          if (r.width * r.height < innerWidth * innerHeight * 0.2) return 1;
+        }
       }
     } catch {
       // Not every document can answer.
@@ -944,7 +967,7 @@ export class Cobwebs {
     const base = document.createElement('canvas');
     const canvas = document.createElement('canvas');
     root.append(style, base, canvas);
-    document.documentElement.appendChild(host);
+    attachHost(host);
     this.host = host;
     this.base = base;
     this.baseCtx = base.getContext('2d');
