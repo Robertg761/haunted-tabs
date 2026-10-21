@@ -150,7 +150,7 @@ if (engine === 'firefox') {
     await tab.mouse.move(width * 0.55, height * 0.45);
     const command =
       effect === 'cobwebs'
-        ? { type: 'haunt:cobwebs', webs: [0, 2, 3, 5, 7][stage], growAfterMs: 0 }
+        ? { type: 'haunt:cobwebs', webs: [0, 2, 3, 4, 5][stage], growAfterMs: 0 }
         : effect === 'possession'
           ? { type: 'haunt:glitch', message: 'I WAITED 3 HOURS', thenRestore: false, durationMs: duration }
           : { type: 'haunt:effects', effects: [effect], stage, idleMs: [0, 31, 61, 125, 245][stage] * 60_000, seed: 12345 };
@@ -255,7 +255,7 @@ try {
     if (cpu > 1) await (await context.newCDPSession(tab)).send('Emulation.setCPUThrottlingRate', { rate: cpu });
     const command =
       effect === 'cobwebs'
-        ? { type: 'haunt:cobwebs', webs: [0, 2, 3, 5, 7][stage], growAfterMs: 0 }
+        ? { type: 'haunt:cobwebs', webs: [0, 2, 3, 4, 5][stage], growAfterMs: 0 }
         : effect === 'possession'
           ? { type: 'haunt:glitch', message: 'I WAITED 3 HOURS', thenRestore: false, durationMs: duration }
           : { type: 'haunt:effects', effects: [effect], stage, idleMs: [0, 31, 61, 125, 245][stage] * 60_000, seed: 12345 };

@@ -43,7 +43,7 @@ import {
   strokeStyles,
 } from './cobwebs-art';
 import { Spider, dropSpiderSprites, type SpiderWorld } from './cobwebs-spider';
-import { HOST_CSS, Z, attachHost, createHost } from './effects/overlay';
+import { HOST_CSS, Z, areasTaken, attachHost, claimAreas, createHost, type Area } from './effects/overlay';
 
 interface Dew {
   s: Strand;
@@ -98,6 +98,10 @@ const FALL_FADE = 1 / 150;
 const SWEEP_FADE = 1 / 78;
 const REDUCED_FADE = 1 / 36;
 const TAU = Math.PI * 2;
+/** Size in px of the cells the window is surveyed in for reading matter. */
+const SURVEY_CELL = 20;
+/** Most of a web that may lie over reading matter. Above this the spot is refused, not just disliked. */
+const MAX_COVER = 0.05;
 
 /** Lay speeds in px per ms, by thread kind, and the speed it walks without spinning. */
 const LAY_SPEED: Record<StrandKind, number> = { 0: 0.23, 1: 0.26, 2: 0.2, 3: 0.17, 4: 0.3, 5: 0.25 };
@@ -107,6 +111,13 @@ interface OrbEnd {
   len: number;
   pin?: (x: number, y: number) => Pin | undefined;
   wall: boolean;
+}
+
+/** Where a web will go, settled before any of it is built. */
+interface Spot {
+  x: number;
+  y: number;
+  R: number;
 }
 
 interface OrbPlan {
@@ -180,6 +191,11 @@ export class Cobwebs {
   private glintU = new Float64Array(MAX_GLINTS);
   private glintI = new Float64Array(MAX_GLINTS);
   private pinOut = { x: 0, y: 0 };
+  /** Reading matter under the window, one cell per SURVEY_CELL px, filled lazily (-1 unknown) for one round of building. */
+  private survey: Int8Array | null = null;
+  private surveyW = 0;
+  private surveyH = 0;
+  private taken: Area[] = [];
 
   private readonly world: SpiderWorld = {
     offX: 0,
@@ -205,19 +221,29 @@ export class Cobwebs {
     // A sweep that is still fading must not tear down the webs laid after it.
     if (this.sweepTimer !== undefined) clearTimeout(this.sweepTimer);
     this.sweepTimer = undefined;
+    // The count is a ceiling: a web only goes where it keeps off the reading matter,
+    // so a page that is text from edge to edge may get one small web or none.
     const want = Math.min(this.maxWebs(), this.count + count);
+    const refused = new Set<string>();
+    this.beginSurvey();
     let guard = 0;
     while (this.count < want && guard++ < MAX_WEBS * 2) {
-      const slot = this.freeSlot();
+      const slot = this.freeSlot(refused);
+      if (!slot) break;
+      const kind = slot.startsWith('free') ? 'free' : slot;
+      const ax = slot === 'tr' || slot === 'br' ? 1 : 0;
+      const ay = slot === 'bl' || slot === 'br' ? 1 : 0;
+      const spot = kind === 'hang' ? this.spotHanging(weave) : kind === 'free' ? this.spotFree(weave) : this.spotCorner(ax, ay, weave);
+      if (!spot) {
+        refused.add(kind);
+        continue;
+      }
       const web = this.newWeb(slot, weave);
-      const plan =
-        slot === 'hang'
-          ? this.buildHanging(web, weave)
-          : slot.startsWith('free')
-            ? this.buildFree(web, weave)
-            : this.buildCorner(web, slot === 'tr' || slot === 'br' ? 1 : 0, slot === 'bl' || slot === 'br' ? 1 : 0, weave);
+      const plan = kind === 'hang' ? this.buildHanging(web, weave, spot) : kind === 'free' ? this.buildFree(web, weave, spot) : this.buildCorner(web, ax, ay, weave, spot);
       this.finishWeb(web, plan, weave);
     }
+    this.survey = null;
+    if (!this.particles.length && !this.spiders.length) return;
     this.ensureCanvas();
     this.report();
     this.scheduleIdle();
@@ -279,68 +305,228 @@ export class Cobwebs {
     return clamp(Math.min(w, h) / 700, 0.55, 1);
   }
 
+  /** How crowded a web of radius R at (x, y) would be by the webs already up: 0 clear, 2 on top of one. */
+  private crowding(x: number, y: number, R: number): number {
+    let score = 0;
+    for (const w of this.webs) {
+      if (w.live <= 0 || !w.R) continue;
+      const keep = (R + w.R) * 1.05;
+      const d = Math.hypot(w.cx - x, w.cy - y);
+      if (d < keep) score += 2 * (1 - d / keep);
+    }
+    return score;
+  }
+
   /**
-   * Somewhere to hang a web of radius R: try a few spots and keep the one that
-   * overlaps other webs least and sits least over text.
+   * Somewhere open to hang a web of radius R: try spots in the box and keep the
+   * one least crowded by other webs, among those that keep off the reading
+   * matter. A smaller web is tried before giving up.
    */
-  private placeHub(R: number, x0: number, x1: number, y0: number, y1: number): { x: number; y: number } {
-    let best = { x: (x0 + x1) / 2, y: (y0 + y1) / 2 };
-    let bestScore = Infinity;
-    for (let i = 0; i < 28; i++) {
-      const x = rand(x0, x1);
-      const y = rand(y0, y1);
-      let score = Math.random() * 0.05;
-      for (const w of this.webs) {
-        if (w.live <= 0 || !w.R) continue;
-        const keep = (R + w.R) * 1.05;
-        const d = Math.hypot(w.cx - x, w.cy - y);
-        if (d < keep) score += 2 * (1 - d / keep);
+  private placeHub(R0: number, box: (R: number) => [number, number, number, number], extra?: (x: number, y: number, R: number) => number): Spot | null {
+    for (const k of [1, 0.78, 0.6]) {
+      const R = R0 * k;
+      const [x0, x1, y0, y1] = box(R);
+      if (x1 < x0 || y1 < y0) continue;
+      let best: Spot | null = null;
+      let bestScore = Infinity;
+      for (let i = 0; i < 36; i++) {
+        const x = rand(x0, x1);
+        const y = rand(y0, y1);
+        const crowd = this.crowding(x, y, R);
+        if (crowd > 0.3) continue;
+        const cover = this.discCover(x, y, R);
+        if (cover > MAX_COVER * 0.75 || (extra && extra(x, y, R) > 0.5)) continue;
+        const score = crowd + cover * 3 + Math.random() * 0.05;
+        if (score < bestScore) {
+          bestScore = score;
+          best = { x, y, R };
+        }
       }
-      if (score < bestScore && score < 2) score += this.overText(x, y, R * 0.6) * 1.2;
-      if (score < bestScore) {
-        bestScore = score;
-        best = { x, y };
-      }
+      if (best) return best;
     }
-    return best;
+    return null;
   }
 
-  /** How much of a web around (x, y) would cover reading matter, 0..1: its hub and six points around it. */
-  private overText(x: number, y: number, r: number): number {
-    let hits = 0;
-    for (let i = 0; i < 7; i++) {
-      const a = (i / 6) * TAU;
-      hits += i ? this.textAt(x + Math.cos(a) * r, y + Math.sin(a) * r) : this.textAt(x, y);
-    }
-    return hits / 7;
+  private beginSurvey(): void {
+    const { w, h } = this.view();
+    this.surveyW = Math.ceil(w / SURVEY_CELL);
+    this.surveyH = Math.ceil(h / SURVEY_CELL);
+    this.survey = new Int8Array(this.surveyW * this.surveyH).fill(-1);
+    this.taken = areasTaken('cobwebs');
   }
 
-  /** 1 if the point is over reading matter (text, links, controls, video), else 0. */
+  /** 1 if (x, y) is over reading matter or another creature's spot, 0 if open, -1 if off the window. */
+  private cell(x: number, y: number): number {
+    const cx = Math.floor(x / SURVEY_CELL);
+    const cy = Math.floor(y / SURVEY_CELL);
+    if (!this.survey || cx < 0 || cy < 0 || cx >= this.surveyW || cy >= this.surveyH) return -1;
+    const i = cy * this.surveyW + cx;
+    if (this.survey[i] < 0) {
+      const px = (cx + 0.5) * SURVEY_CELL;
+      const py = (cy + 0.5) * SURVEY_CELL;
+      const theirs = this.taken.some((a) => px >= a.x && px <= a.x + a.w && py >= a.y && py <= a.y + a.h);
+      this.survey[i] = theirs ? 1 : this.textAt(px, py);
+    }
+    return this.survey[i];
+  }
+
+  /** Share of a disc of radius R (hub and rings out past its rim) that lies over reading matter. */
+  private discCover(x: number, y: number, R: number): number {
+    let hit = this.cell(x, y);
+    let n = hit >= 0 ? 1 : 0;
+    hit = Math.max(0, hit);
+    // Out past the rim: radials run on to about 1.1 R.
+    for (const f of [0.35, 0.65, 0.9, 1.08]) {
+      const steps = Math.round(4 + 10 * f);
+      const turn = f * 1.7;
+      for (let j = 0; j < steps; j++) {
+        const a = turn + (j / steps) * TAU;
+        const c = this.cell(x + Math.cos(a) * R * f, y + Math.sin(a) * R * f);
+        if (c < 0) continue;
+        n++;
+        hit += c;
+      }
+    }
+    return n ? hit / n : 1;
+  }
+
+  /** Share of a corner web's quarter (hub at hx, hy, opening towards sx, sy) that lies over reading matter. */
+  private wedgeCover(hx: number, hy: number, R: number, sx: number, sy: number): number {
+    let hit = 0;
+    let n = 0;
+    for (const f of [0.15, 0.4, 0.65, 0.85, 1.05]) {
+      const steps = Math.round(3 + 9 * f);
+      for (let j = 0; j <= steps; j++) {
+        const a = (j / steps) * (Math.PI / 2);
+        const c = this.cell(hx + sx * Math.cos(a) * R * f, hy + sy * Math.sin(a) * R * f);
+        if (c < 0) continue;
+        n++;
+        hit += c;
+      }
+    }
+    return n ? hit / n : 1;
+  }
+
+  /**
+   * 1 if the point is over reading matter, else 0: actual lines of text (not the
+   * empty end of a paragraph's box), controls and media, and small boxes holding
+   * text such as cards, chips and menus.
+   */
   private textAt(x: number, y: number): number {
     try {
       let el = document.elementFromPoint(x, y);
+      const small = innerWidth * innerHeight * 0.08;
       for (let i = 0; el && i < 3; i++, el = el.parentElement) {
-        if (/^(P|H[1-6]|LI|A|BUTTON|LABEL|INPUT|TEXTAREA|SELECT|TD|TH|PRE|CODE|BLOCKQUOTE|FIGCAPTION|DT|DD|VIDEO|IFRAME)$/.test(el.tagName)) return 1;
-        // Text set straight into a box of its own, as app UIs do with divs and spans.
-        if (i === 0 && Array.from(el.childNodes).some((n) => n.nodeType === 3 && n.textContent!.trim())) {
-          const r = el.getBoundingClientRect();
-          if (r.width * r.height < innerWidth * innerHeight * 0.2) return 1;
-        }
+        if (/^(BUTTON|LABEL|INPUT|TEXTAREA|SELECT|VIDEO|IFRAME|IMG|CANVAS|EMBED|OBJECT)$/.test(el.tagName)) return 1;
+        if ((el as HTMLElement).isContentEditable) return 1;
+        if (/^(P|H[1-6]|LI|TD|TH|PRE|BLOCKQUOTE|FIGCAPTION|DT|DD|SPAN|B|I|EM|STRONG|SMALL|CODE)$/.test(el.tagName)) continue;
+        const r = el.getBoundingClientRect();
+        if (r.width * r.height < small && r.width < innerWidth * 0.6 && el.textContent!.trim()) return 1;
       }
+      return this.onGlyphs(x, y) ? 1 : 0;
     } catch {
       // Not every document can answer.
     }
     return 0;
   }
 
+  /** Is there a line of text at (x, y), give or take the gap to the next line? */
+  private onGlyphs(x: number, y: number): boolean {
+    const doc = document as Document & {
+      caretPositionFromPoint?(x: number, y: number): { offsetNode: Node; offset: number } | null;
+      caretRangeFromPoint?(x: number, y: number): Range | null;
+    };
+    let node: Node | null = null;
+    let offset = 0;
+    if (doc.caretPositionFromPoint) {
+      const pos = doc.caretPositionFromPoint(x, y);
+      if (pos) ({ offsetNode: node, offset } = pos);
+    } else if (doc.caretRangeFromPoint) {
+      const range = doc.caretRangeFromPoint(x, y);
+      if (range) ({ startContainer: node, startOffset: offset } = range);
+    }
+    if (!node || node.nodeType !== 3) return false;
+    const len = node.textContent!.length;
+    if (!len) return false;
+    const range = document.createRange();
+    const pad = SURVEY_CELL * 0.8;
+    for (const at of [Math.min(offset, len - 1), Math.max(0, offset - 1)]) {
+      range.setStart(node, at);
+      range.setEnd(node, at + 1);
+      for (const r of Array.from(range.getClientRects())) {
+        if (x >= r.left - pad && x <= r.right + pad && y >= r.top - pad && y <= r.bottom + pad) return true;
+      }
+    }
+    return false;
+  }
+
+  /** The areas our webs cover, so the other creatures can keep out of them. */
+  private claim(): void {
+    const areas: Area[] = [];
+    for (const w of this.webs) {
+      if (w.live <= 0 || !w.R || !w.hub) continue;
+      areas.push({ x: w.hub.x - w.R, y: w.hub.y - w.R, w: w.R * 2, h: w.R * 2 });
+    }
+    claimAreas('cobwebs', areas);
+  }
+
+  /** A corner web as big as the corner allows: it shrinks to stay off the reading matter, or the corner is left bare. */
+  private spotCorner(ax: number, ay: number, weave: boolean): Spot | null {
+    const { w: vw, h: vh } = this.view();
+    const short = Math.min(vw, vh);
+    const R0 = clamp(short * rand(0.26, 0.36), Math.min(110, short * 0.26), Math.min(weave ? 190 : 270, short * 0.42));
+    const sx = ax ? -1 : 1;
+    const sy = ay ? -1 : 1;
+    const inset = rand(0.2, 0.28);
+    const jx = rand(0.9, 1.25);
+    const jy = rand(0.9, 1.25);
+    for (const k of [1, 0.88, 0.76, 0.64, 0.52]) {
+      const R = R0 * k;
+      const x = (ax ? vw : 0) + sx * R * inset * jx;
+      const y = (ay ? vh : 0) + sy * R * inset * jy;
+      if (this.crowding(x, y, R) > 0.8) continue;
+      if (this.wedgeCover(x, y, R, sx, sy) <= MAX_COVER) return { x, y, R };
+    }
+    return null;
+  }
+
+  /** A small web on a thread from the top of the window, anywhere across it where the web and most of its thread are clear. */
+  private spotHanging(weave: boolean): Spot | null {
+    const { w: vw, h: vh } = this.view();
+    const R0 = (weave ? rand(58, 80) : rand(58, 88)) * this.sizeScale();
+    return this.placeHub(
+      R0,
+      (R) => [R + 8, vw - R - 8, Math.max(R + 24, vh * 0.18), Math.max(R + 24, vh * 0.45)],
+      (x, y, R) => {
+        // The thread may cross a line or two, not run down a column of text.
+        let hit = 0;
+        let n = 0;
+        for (let t = SURVEY_CELL; t < y - R; t += SURVEY_CELL * 2) {
+          n++;
+          hit += Math.max(0, this.cell(x, t));
+        }
+        return n ? hit / n : 0;
+      },
+    );
+  }
+
+  /** An orb web strung across an open stretch of the page. */
+  private spotFree(weave: boolean): Spot | null {
+    const { w: vw, h: vh } = this.view();
+    const R0 = (weave ? rand(80, 120) : rand(80, 140)) * this.sizeScale();
+    return this.placeHub(R0, (R) => [R * 0.8, vw - R * 0.8, Math.min(vh * 0.5, vh * 0.25 + R * 0.3), Math.max(vh * 0.5, vh - R * 0.8)]);
+  }
+
   // --- building --------------------------------------------------------------
 
-  private freeSlot(): string {
+  /** The next kind of place to try, skipping those already found to have no room this round. */
+  private freeSlot(refused: Set<string>): string | null {
     const taken = new Set(this.webs.filter((w) => w.live > 0).map((w) => w.slot));
-    const corners = ['tl', 'tr', 'bl', 'br'].filter((c) => !taken.has(c)).sort(() => Math.random() - 0.5);
+    const corners = ['tl', 'tr', 'bl', 'br'].filter((c) => !taken.has(c) && !refused.has(c)).sort(() => Math.random() - 0.5);
     if (corners.length) return corners[0];
-    if (!taken.has('hang')) return 'hang';
-    return `free${Math.random()}`;
+    if (!taken.has('hang') && !refused.has('hang')) return 'hang';
+    if (!refused.has('free')) return `free${Math.random()}`;
+    return null;
   }
 
   private newWeb(slot: string, weave: boolean): Web {
@@ -503,17 +689,15 @@ export class Cobwebs {
   }
 
   /** A web filling a corner of the window, hub near the corner, glued to both edges and the page. */
-  private buildCorner(web: Web, ax: number, ay: number, weave: boolean): OrbPlan {
+  private buildCorner(web: Web, ax: number, ay: number, weave: boolean, spot: Spot): OrbPlan {
     // Glue to the visible frame: not under the scrollbars, not the whole quirks-mode document.
     const { w: vw, h: vh } = this.view();
-    const short = Math.min(vw, vh);
-    const R = clamp(short * rand(0.26, 0.36), Math.min(110, short * 0.26), Math.min(weave ? 190 : 270, short * 0.42));
+    const R = spot.R;
     const cx0 = ax ? vw : 0;
     const cy0 = ay ? vh : 0;
     const sx = ax ? -1 : 1;
     const sy = ay ? -1 : 1;
-    const inset = R * rand(0.2, 0.28);
-    const hub = this.particle(web, cx0 + sx * inset * rand(0.9, 1.25), cy0 + sy * inset * rand(0.9, 1.25));
+    const hub = this.particle(web, spot.x, spot.y);
     const spokes = Math.round(rand(14, 18));
     const turns = Math.round(rand(weave ? 7 : 8, weave ? 9 : 11));
     const plan = this.orb(web, hub, R, spokes, turns, (theta) => {
@@ -537,10 +721,8 @@ export class Cobwebs {
   }
 
   /** A small orb web hanging on one thread from the top of the window. */
-  private buildHanging(web: Web, weave: boolean): OrbPlan {
-    const { w: vw, h: vh } = this.view();
-    const R = rand(58, 88) * this.sizeScale();
-    const spot = this.placeHub(R, vw * 0.25, vw * 0.75, vh * 0.2, vh * 0.42);
+  private buildHanging(web: Web, weave: boolean, spot: Spot): OrbPlan {
+    const R = spot.R;
     const topX = spot.x;
     const depth = spot.y;
     const top = this.particle(web, topX, 0, this.viewportPin(topX, 0, 0, 0));
@@ -569,10 +751,8 @@ export class Cobwebs {
   }
 
   /** An orb web strung across open page, every end glued to the content. */
-  private buildFree(web: Web, weave: boolean): OrbPlan {
-    const { w: vw, h: vh } = this.view();
-    const R = (weave ? rand(80, 120) : rand(80, 140)) * this.sizeScale();
-    const { x, y } = this.placeHub(R, Math.min(vw * 0.5, R * 0.8), Math.max(vw * 0.5, vw - R * 0.8), Math.min(vh * 0.5, vh * 0.25 + R * 0.3), Math.max(vh * 0.5, vh - R * 0.8));
+  private buildFree(web: Web, weave: boolean, spot: Spot): OrbPlan {
+    const { x, y, R } = spot;
     const hub = this.particle(web, x, y);
     const plan = this.orb(web, hub, R, Math.round(rand(11, 15)), Math.round(rand(6, 8)), () => ({
       len: R * rand(0.88, 1.1),
@@ -967,7 +1147,7 @@ export class Cobwebs {
     const base = document.createElement('canvas');
     const canvas = document.createElement('canvas');
     root.append(style, base, canvas);
-    attachHost(host);
+    attachHost(host, Z.cobwebs);
     this.host = host;
     this.base = base;
     this.baseCtx = base.getContext('2d');
@@ -1640,6 +1820,7 @@ export class Cobwebs {
 
   /** Expose the web count on the host element, for tests and the curious. */
   private report(): void {
+    this.claim();
     const v = String(this.count);
     if (this.host && v !== this.reported) {
       this.host.dataset.webs = v;
@@ -2015,6 +2196,7 @@ export class Cobwebs {
     this.breaks = [];
     this.inBase.clear();
     this.falling = this.tails = 0;
+    claimAreas('cobwebs', []);
     dropSprites();
     dropSpiderSprites();
   }
