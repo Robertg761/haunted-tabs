@@ -30,7 +30,10 @@ import { ext } from '../shared/ext';
 const TICK_ALARM = 'haunt-tick';
 const SESSION_KEY = 'hauntState';
 const ALL_URLS = { origins: ['<all_urls>'] };
-const GLITCH_MS = 1100;
+/** Long enough to read the message: 1.1 s, plus 25 ms per character over 16, up to 1.8 s. */
+function glitchMs(message: string): number {
+  return Math.min(1800, 1100 + 25 * Math.max(0, Array.from(message).length - 16));
+}
 
 interface SessionState {
   records: Record<number, TabRecord>;
@@ -404,7 +407,7 @@ async function maybePoltergeist(tabs: chrome.tabs.Tab[], stages: Map<number, Sta
       const [active] = await ext.tabs.query({ active: true, lastFocusedWindow: true });
       if (!active?.id || isProtected(active)) return false;
       const message = poltergeistMessage(realTitle, rec.seed + now);
-      const res = await send<{ ok: boolean }>(active.id, { type: 'haunt:glitch', message, thenRestore: false, durationMs: GLITCH_MS }, true);
+      const res = await send<{ ok: boolean }>(active.id, { type: 'haunt:glitch', message, thenRestore: false, durationMs: glitchMs(message) }, true);
       return !!res?.ok;
     });
   }
@@ -507,11 +510,8 @@ async function returnVisit(tab: chrome.tabs.Tab, rec: TabRecord, stage: Stage, i
       const title = paintedTitle(tab, rec, stage, Date.now());
       await send(tabId, { type: 'haunt:apply', title, icon: await iconFor(stage as Exclude<Stage, Stage.Alive>, tab.url ?? '', rec.realFavIconUrl) }, true);
     }
-    const res = await send<{ ok: boolean }>(
-      tabId,
-      { type: 'haunt:glitch', message: possessionMessage(idle, rec.seed), thenRestore: true, durationMs: GLITCH_MS },
-      false,
-    );
+    const message = possessionMessage(idle, rec.seed);
+    const res = await send<{ ok: boolean }>(tabId, { type: 'haunt:glitch', message, thenRestore: true, durationMs: glitchMs(message) }, false);
     delivered = !!res?.ok;
   } else {
     // Always ask: cheap when there is nothing to restore, and it catches paint
