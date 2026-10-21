@@ -5,7 +5,7 @@ import type { EffectName, PageCommand, PageEvent } from '../shared/types';
 import { ext } from '../shared/ext';
 import { Cobwebs } from './cobwebs';
 import { EFFECTS } from './effects';
-import { possess } from './effects/possession';
+import { possess, possessionDone } from './effects/possession';
 import type { Effect } from './effects/types';
 import { prefersReducedMotion } from './effects/overlay';
 
@@ -35,10 +35,22 @@ let lastReportedTitle = '';
 let dirtyByInput = false;
 let cobwebs: Cobwebs | null = null;
 const running = new Map<EffectName, Effect>();
+/** Effects fading out after a stop. Restarting one revives it instead of duplicating it. */
+const fading = new Map<EffectName, Effect>();
+/** Counts stops and sweeps, so a start still waiting on a possession can tell it was cancelled meanwhile. */
+let epoch = 0;
+let sweptAt = 0;
+const stoppedAt = new Map<EffectName, number>();
 
 function startEffects(names: EffectName[], stage: number, idleMs: number, seed: number): void {
   const reduced = prefersReducedMotion();
   for (const name of names) {
+    // Coming back during a fade-out revives the same effect where it is, rather
+    // than starting a second copy from nothing. Each effect's start() cancels its fade.
+    const reviving = fading.get(name);
+    fading.delete(name);
+    if (reviving?.active && !running.has(name)) running.set(name, reviving);
+    else reviving?.destroy();
     let effect = running.get(name);
     if (!effect || !effect.active) {
       effect = EFFECTS[name]();
@@ -57,8 +69,12 @@ function startEffects(names: EffectName[], stage: number, idleMs: number, seed: 
 
 function stopEffects(names: Iterable<EffectName>): void {
   for (const name of [...names]) {
-    running.get(name)?.stop();
+    const effect = running.get(name);
     running.delete(name);
+    if (!effect) continue;
+    fading.get(name)?.destroy();
+    fading.set(name, effect);
+    effect.stop();
   }
 }
 
@@ -257,21 +273,41 @@ if (!window.__hauntedTabs) {
       case 'haunt:dirty':
         sendResponse({ ok: true, dirty: hasUnsavedInput() });
         return;
-      case 'haunt:cobwebs':
+      case 'haunt:cobwebs': {
+        // Webs settle in once a possession has let go of the screen, unless a sweep came first.
+        const asked = epoch;
         cobwebs ??= new Cobwebs();
-        cobwebs.add(msg.webs);
-        if (msg.growAfterMs > 0) cobwebs.arm(msg.growAfterMs);
-        sendResponse({ ok: true, webs: cobwebs.count });
+        const web = cobwebs;
+        void possessionDone().then(() => {
+          if (sweptAt > asked || cobwebs !== web) return;
+          web.add(msg.webs);
+          if (msg.growAfterMs > 0) web.arm(msg.growAfterMs);
+        });
+        sendResponse({ ok: true, webs: cobwebs.count + msg.webs });
         return;
-      case 'haunt:effects':
-        startEffects(msg.effects, msg.stage, msg.idleMs, msg.seed);
+      }
+      case 'haunt:effects': {
+        const asked = epoch;
+        void possessionDone().then(() => {
+          if (sweptAt > asked) return;
+          startEffects(
+            msg.effects.filter((name) => (stoppedAt.get(name) ?? 0) <= asked),
+            msg.stage,
+            msg.idleMs,
+            msg.seed,
+          );
+        });
         sendResponse({ ok: true });
         return;
+      }
       case 'haunt:stopEffects':
+        epoch++;
+        for (const name of msg.effects) stoppedAt.set(name, epoch);
         stopEffects(msg.effects);
         sendResponse({ ok: true });
         return;
       case 'haunt:sweep':
+        sweptAt = ++epoch;
         cobwebs?.sweep();
         stopEffects(running.keys());
         sendResponse({ ok: true });

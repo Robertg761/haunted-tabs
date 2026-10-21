@@ -154,6 +154,13 @@ try {
     await alpha.evaluate(() => !!document.querySelector('link[href="/fav.svg"]') && !document.querySelector('link[data-haunted-tabs][rel=icon]')),
     'real favicon restored',
   );
+  const effectsOn = () => alpha.evaluate(() => [...document.querySelectorAll('[data-haunted-tabs^="effect-"]')].map((e) => e.getAttribute('data-haunted-tabs')).sort());
+  const greeted = await eventually(async () => (await effectsOn()).length >= 3 && (await effectsOn()), 4000);
+  check(JSON.stringify(greeted) === JSON.stringify(['effect-dust', 'effect-eyes', 'effect-fog']), `page effects start after the possession (${greeted})`);
+  await ask({ type: 'setSettings', settings: { fog: false } });
+  const unfogged = await eventually(async () => !(await effectsOn()).includes('effect-fog') && (await effectsOn()), 4000);
+  check(JSON.stringify(unfogged) === JSON.stringify(['effect-dust', 'effect-eyes']), `turning fog off clears it from the page (${unfogged})`);
+  await ask({ type: 'setSettings', settings: { fog: true } });
 
   // Alpha stays in view while everything else rots into the ground.
   await advance(250 * MIN);
@@ -192,6 +199,8 @@ try {
   check(snap.settings.enabled === false, 'exorcise switches haunting off');
   check(await eventually(async () => (await form.title()) === 'Form page'), 'exorcise restores real titles');
   check((await form.evaluate(() => document.querySelector('#name').value)) === 'half-written message', 'unsaved input is untouched');
+  check(await eventually(async () => (await effectsOn()).length === 0, 4000), 'exorcise clears every page effect');
+  check(await alpha.evaluate(() => [...document.querySelectorAll('[data-haunted-tabs]')].every((e) => e.getAttribute('aria-hidden') === 'true')), 'overlays stay hidden from screen readers');
 
   // Memory saving: the browser unloads a neglected tab. When you come back it
   // reloads from scratch, and the haunting has to greet you anyway.

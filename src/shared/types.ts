@@ -74,6 +74,8 @@ export interface TabRecord {
   needsExorcise?: boolean;
   /** Cobweb growth is running in the current page. */
   cobwebsArmed?: boolean;
+  /** Page effects may be running in the current page. */
+  effectsArmed?: boolean;
   /** A return visit to replay once a tab the browser unloaded has reloaded. */
   pendingReturn?: { stage: Stage; idle: number; at: number; url?: string };
   /** The visit that just played, in case the page reloads straight after. */
