@@ -118,6 +118,7 @@ npm run e2e         # builds, then drives a real Chromium with the extension loa
 npm run e2e:firefox # same idea in a real Firefox (downloads one into .cache/, or set FIREFOX_PATH)
 npm run lint:firefox  # Mozilla's add-on linter on dist/firefox
 npm run test:popup  # smoke test of the popup UI
+npm run test:content  # the in-page script: paint, unsaved input, overlay stacking
 ```
 
 To look at one effect on a realistic page, build and then run the effect harness. It saves screenshots over time, reports the frame rate and console errors, and with `--stop` checks that nothing is left behind:

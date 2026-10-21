@@ -139,7 +139,8 @@ export type PopupRequest =
   | { type: 'snapshot' }
   | { type: 'setSettings'; settings: Partial<Settings> }
   | { type: 'exorcise' }
-  | { type: 'bury'; tabId: number }
+  /** `force` closes a tab that could not be checked for unsaved input (never one known to have some). */
+  | { type: 'bury'; tabId: number; force?: boolean }
   | { type: 'discard'; tabId: number }
   | { type: 'switch'; tabId: number }
   /** Remove graves (resurrected or laid to rest), in the same queue as burials so none is lost. */

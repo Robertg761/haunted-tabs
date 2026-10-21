@@ -56,6 +56,8 @@ let shownLevel = -1;
 const pending = new Set<string>();
 /** Tabs with a bury or discard on its way, so a double click or a held key acts once. */
 const busy = new Set<number>();
+/** Tabs the background could not check for unsaved input, and when it said so. */
+const uncheckedAt = new Map<number, number>();
 
 /**
  * Until the first snapshot arrives (the background may need a moment to wake), lay the
@@ -1042,9 +1044,13 @@ async function act(row: HTMLElement, action: string | undefined): Promise<void> 
     } else if (action === 'bury') {
       // Feedback right away; the row sinks out once the tab is really closed.
       row.classList.add('sinking');
-      const res = await ask<{ ok: boolean; reason?: string }>({ type: 'bury', tabId });
+      // A second bury soon after "couldn't check" is the user insisting.
+      const force = uncheckedAt.get(tabId) !== undefined && Date.now() - uncheckedAt.get(tabId)! < 8000;
+      uncheckedAt.delete(tabId);
+      const res = await ask<{ ok: boolean; reason?: string; unchecked?: boolean }>({ type: 'bury', tabId, force });
       if (!res.ok) {
         row.classList.remove('sinking');
+        if (res.unchecked) uncheckedAt.set(tabId, Date.now());
         if (res.reason) say(res.reason, 'warn');
       }
       await refresh();

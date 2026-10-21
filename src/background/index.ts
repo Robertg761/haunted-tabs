@@ -801,8 +801,8 @@ async function handle(req: PopupRequest): Promise<unknown> {
       if (!tab.discarded && isHauntableUrl(tab.url)) {
         const res = await send<{ ok: boolean; dirty: boolean }>(tab.id!, { type: 'haunt:dirty' }, true);
         if (res?.dirty) return { ok: false, reason: 'That tab has unsaved input, so it stays open. Finish it there first.' };
-        if (res?.ok !== true) {
-          return { ok: false, reason: "Couldn't check that tab for unsaved input, so it stays open. Close it yourself if you're sure." };
+        if (res?.ok !== true && !req.force) {
+          return { ok: false, unchecked: true, reason: "Couldn't check that tab for unsaved input. Bury it again to close it anyway." };
         }
       }
       await bury(tab, recordFor(tab, Date.now()), 'you', Date.now());
