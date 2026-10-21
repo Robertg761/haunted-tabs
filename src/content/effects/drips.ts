@@ -1710,10 +1710,23 @@ export class Drips implements Effect {
       pi = inten;
       pg = g;
     }
-    // Live segment from the last trail point to the head.
-    if (d.m > 1 && d.phase !== RESTING) {
+    if (d.m > 1) {
       const rv = Math.sqrt(d.m / Math.PI);
-      this.ribbon(px, py, pr, pi, pg, d.x + d.waver, d.y - rv * 0.2, Math.max(pr, Math.min(5.5 * this.sizeK * d.k, rv * 0.42)), fresh, 1);
+      const hx = d.x + d.waver;
+      if (d.phase !== RESTING) {
+        // Live segment from the last trail point to the head.
+        const r = Math.max(pr, Math.min(5.5 * this.sizeK * d.k, rv * 0.42));
+        const hy = d.y - rv * 0.2;
+        this.ribbon(px, py, pr, pi, pg, hx, hy, r, fresh, 1);
+        px = hx;
+        py = hy;
+        pr = r;
+        pi = fresh;
+        pg = 1;
+      }
+      // On into the head, fading out: a trail that simply stopped there would leave a step in
+      // the surface, which lights up as a bright bar across the middle of the bead.
+      this.ribbon(px, py, pr, pi, pg, hx, d.y + rv * 0.6, pr, 0, pg);
     }
   }
 
