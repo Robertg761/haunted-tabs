@@ -6,11 +6,16 @@ import {
   hauntedTitle,
   isHauntableUrl,
   poltergeistCooldownMs,
+  poltergeistMessage,
   possessionMessage,
+  shorten,
   siteName,
+  skipDowntime,
+  sleptMs,
   spokenDuration,
   stageFor,
   stageProgress,
+  whisperMessage,
 } from '../src/shared/haunt';
 import { Stage } from '../src/shared/types';
 
@@ -62,6 +67,7 @@ describe('formatting', () => {
     expect(formatIdle(12 * MIN)).toBe('12m');
     expect(formatIdle(125 * MIN)).toBe('2h 5m');
     expect(formatIdle(26 * 60 * MIN)).toBe('1d 2h');
+    expect(formatIdle(-5_000)).toBe('0s');
   });
 
   it('speaks durations like a ghost would', () => {
@@ -75,6 +81,9 @@ describe('formatting', () => {
   it('names sites', () => {
     expect(siteName('https://www.example.com/path')).toBe('example.com');
     expect(siteName('file:///home/me/notes.html')).toBe('notes.html');
+    expect(siteName('file:///home/me/my%20notes.html')).toBe('my notes.html');
+    expect(siteName('about:blank')).toBe('about:blank');
+    expect(siteName('data:text/html,hi')).toBe('data');
   });
 });
 
@@ -120,6 +129,71 @@ describe('titles', () => {
 
   it('builds possession messages', () => {
     for (let seed = 0; seed < 50; seed++) expect(possessionMessage(3 * 60 * MIN, seed)).not.toMatch(/[{}]/);
+  });
+
+  it('keeps dollar signs in titles literal', () => {
+    // String.replace would read "$&" and "$'" in a replacement as patterns.
+    const realTitle = "Save $& more, it's $' off";
+    for (let seed = 0; seed < 200; seed++) {
+      for (const stage of [Stage.Ghost, Stage.Dead, Stage.Entombed]) {
+        const t = hauntedTitle({ ...base, realTitle, seed, stage, idleMs: 300 * MIN });
+        if (t.includes('Save')) expect(t).toContain('Save $& more');
+      }
+      expect(poltergeistMessage(realTitle, seed)).toContain('$& MORE');
+      expect(whisperMessage(realTitle, 3 * 60 * MIN, seed).message).toContain('$& more');
+    }
+  });
+
+  it('never cuts an emoji or accent in half', () => {
+    const family = '👨‍👩‍👧';
+    const long = `${family} ${'é'.normalize('NFD')}`.repeat(20);
+    const cut = shorten(long, 10);
+    expect(cut.endsWith('…')).toBe(true);
+    expect(cut).not.toMatch(/\u200d…|\ud83d…/);
+    for (let seed = 0; seed < 50; seed++) expect(corruptTitle(`${family} Family photos`, 1, seed)).toContain(family);
+    expect(corruptTitle('🎃🎃', 1, 3)).not.toBe('🎃🎃');
+  });
+
+  it('does not stack ellipses when a title is cut short', () => {
+    const realTitle = 'A very long article title about nothing at all, really';
+    for (let seed = 0; seed < 200; seed++) {
+      for (const stage of [Stage.Ghost, Stage.Dead, Stage.Entombed]) {
+        expect(hauntedTitle({ ...base, realTitle, seed, stage, idleMs: 300 * MIN })).not.toContain('……');
+      }
+    }
+  });
+
+  it('whispers in full sentences', () => {
+    for (let seed = 0; seed < 50; seed++) {
+      const w = whisperMessage('Inbox (3) - Mail', 3 * 60 * MIN, seed);
+      expect(w.title.startsWith('👻')).toBe(true);
+      expect(w.message).not.toMatch(/[{}]/);
+    }
+    expect(whisperMessage('x'.repeat(200), MIN, 1).message.length).toBeLessThan(140);
+  });
+});
+
+describe('sleep', () => {
+  const period = 30_000;
+
+  it('reads ordinary alarm jitter as no sleep', () => {
+    expect(sleptMs(1_000_000, 1_000_000 + period, period)).toBe(0);
+    expect(sleptMs(1_000_000, 1_000_000 + 3 * period, period)).toBe(0);
+  });
+
+  it('measures a sleep from how late the alarm fired', () => {
+    expect(sleptMs(1_000_000, 1_000_000 + 8 * 60 * MIN + period, period)).toBe(8 * 60 * MIN);
+  });
+
+  it('only takes the downtime off tabs seen before it began', () => {
+    const now = 100 * MIN;
+    expect(skipDowntime(10 * MIN, 20 * MIN, 60 * MIN, now)).toBe(70 * MIN);
+    expect(skipDowntime(90 * MIN, 20 * MIN, 60 * MIN, now)).toBe(90 * MIN);
+    expect(skipDowntime(10 * MIN, 20 * MIN, 500 * MIN, now)).toBe(now);
+    // A tab idle for 2 hours before an 8 hour night is still 2 hours idle after it.
+    const night = 8 * 60 * MIN;
+    const sleptAt = 1_000 * MIN;
+    expect(sleptAt + night - skipDowntime(sleptAt - 120 * MIN, sleptAt, night, sleptAt + night)).toBe(120 * MIN);
   });
 });
 

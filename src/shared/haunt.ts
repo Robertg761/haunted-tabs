@@ -31,6 +31,25 @@ export function stageProgress(idleMs: number, thresholdMinutes: number): number 
   return Math.min(1, Math.max(0, (idleMs - start) / (end - start)));
 }
 
+/** A tick alarm running this late means the computer slept or the browser was closed. */
+export const SLEEP_GAP_MS = 3 * MINUTE;
+
+/**
+ * How long the computer slept, judged by the periodic tick alarm. After a sleep
+ * it fires once, late, still carrying the time it was due, and the browser has
+ * already set its next run after the wake. Both times come from the browser's
+ * own clock. Ordinary scheduling jitter counts as no sleep at all.
+ */
+export function sleptMs(dueAt: number, nextAt: number, periodMs: number): number {
+  const late = nextAt - dueAt - periodMs;
+  return late > SLEEP_GAP_MS ? late : 0;
+}
+
+/** Nobody could use the browser for `ms` from `from`: a tab last seen before then ages that much less. */
+export function skipDowntime(lastSeen: number, from: number, ms: number, now: number): number {
+  return lastSeen < from ? Math.min(lastSeen + ms, now) : lastSeen;
+}
+
 // Mozilla sites Firefox never lets extensions script.
 const FIREFOX_RESTRICTED = new Set([
   'accounts-static.cdn.mozilla.net',
@@ -67,8 +86,10 @@ export function siteName(url: string | undefined): string {
   if (!url) return 'nowhere';
   try {
     const u = new URL(url);
-    if (u.protocol === 'file:') return u.pathname.split('/').pop() || 'a file';
+    if (u.protocol === 'file:') return safeDecode(u.pathname.split('/').pop() ?? '') || 'a file';
     if (u.protocol === 'chrome-extension:' || u.protocol === 'moz-extension:') return 'extension page';
+    // about:blank, data:, blob: have no host to name.
+    if (!u.hostname) return u.protocol === 'about:' ? `about:${u.pathname}` : u.protocol.slice(0, -1);
     if (u.protocol !== 'http:' && u.protocol !== 'https:') return `${u.protocol}//${u.hostname}`;
     return u.hostname.replace(/^www\./, '') || u.protocol.replace(':', '');
   } catch {
@@ -76,8 +97,17 @@ export function siteName(url: string | undefined): string {
   }
 }
 
+function safeDecode(text: string): string {
+  try {
+    return decodeURIComponent(text);
+  } catch {
+    return text;
+  }
+}
+
 export function formatIdle(ms: number): string {
-  const s = Math.floor(ms / 1000);
+  // A clock set backwards can leave a tab "seen" in the future.
+  const s = Math.max(0, Math.floor(ms / 1000));
   if (s < 60) return `${s}s`;
   const m = Math.floor(s / 60);
   if (m < 60) return `${m}m`;
@@ -120,14 +150,25 @@ const LOOKALIKES: Record<string, string> = {
 };
 const MARKS = ['̴', '̵', '̷', '̸', '̖', '̗', '̀', '́'];
 
+const segmenter = typeof Intl.Segmenter === 'function' ? new Intl.Segmenter(undefined, { granularity: 'grapheme' }) : undefined;
+
+/** Split text into what a reader sees as single characters: emoji, accents and Indic clusters stay whole. */
+function graphemes(text: string): string[] {
+  return segmenter ? Array.from(segmenter.segment(text), (s) => s.segment) : Array.from(text);
+}
+
 /**
  * Rot a title: swap letters for lookalikes and sprinkle combining marks.
  * The same seed rots the same letters first, so higher intensity only adds rot.
+ * Marks go after whole characters, so emoji sequences and accented letters never split.
  */
 export function corruptTitle(title: string, intensity: number, seed: number): string {
   const rand = rng(seed);
-  const chars = Array.from(title);
-  const spots = chars.flatMap((ch, i) => (/\S/.test(ch) ? [i] : []));
+  const chars = graphemes(title);
+  const rottable = (ch: string) => /\S/.test(ch) && !/\p{Extended_Pictographic}/u.test(ch);
+  let spots = chars.flatMap((ch, i) => (rottable(ch) ? [i] : []));
+  // A title of nothing but emoji still has to rot somehow.
+  if (spots.length === 0) spots = chars.flatMap((ch, i) => (/\S/.test(ch) ? [i] : []));
   for (let i = spots.length - 1; i > 0; i--) {
     const j = Math.floor(rand() * (i + 1));
     [spots[i], spots[j]] = [spots[j], spots[i]];
@@ -141,10 +182,20 @@ export function corruptTitle(title: string, intensity: number, seed: number): st
   return chars.join('');
 }
 
-function shorten(text: string, max: number): string {
+/** Collapse whitespace and cut to `max` characters, never through the middle of one. */
+export function shorten(text: string, max: number): string {
   const clean = text.replace(/\s+/g, ' ').trim();
-  if (clean.length <= max) return clean;
-  return clean.slice(0, max - 1).trimEnd() + '…';
+  const chars = graphemes(clean);
+  if (chars.length <= max) return clean;
+  return chars.slice(0, max - 1).join('').trimEnd() + '…';
+}
+
+/**
+ * Fill a line's {placeholders}. Replacer functions keep a "$&" or "$1" in a
+ * title literal, and a title cut short does not end up with a double ellipsis.
+ */
+function fill(line: string, values: Record<string, string>): string {
+  return line.replace(/\{(\w+)\}/g, (match, key: string) => values[key] ?? match).replace(/……/g, '…');
 }
 
 const GHOST_LINES = [
@@ -156,6 +207,8 @@ const GHOST_LINES = [
   '👻 come back… come back…',
   '👻 {short} (abandoned)',
   '👻 I waited {idle} for you',
+  '👻 I can hear you breathing',
+  "👻 Don't close me. Please.",
 ];
 
 const DEAD_LINES = [
@@ -167,6 +220,8 @@ const DEAD_LINES = [
   '💀 You let me rot',
   '💀 {short} is not breathing',
   '💀 It has been {idle}',
+  '💀 Something is wearing {site}',
+  '💀 Who closed my eyes?',
 ];
 
 const TOMB_LINES = [
@@ -174,6 +229,8 @@ const TOMB_LINES = [
   '⚰️ The grave for {site} is dug',
   '⚰️ R.I.P. {short}',
   '⚰️ Forgotten {idle} ago',
+  '⚰️ Buried alive in {site}',
+  '⚰️ Let me out',
 ];
 
 export interface TitleInput {
@@ -196,10 +253,7 @@ export function hauntedTitle({ stage, realTitle, url, idleMs, thresholdMinutes, 
   }
   const lines = stage === Stage.Ghost ? GHOST_LINES : stage === Stage.Dead ? DEAD_LINES : TOMB_LINES;
   const line = lines[Math.floor(rng(seed + stage)() * lines.length)];
-  return line
-    .replace('{short}', shorten(title, 28))
-    .replace('{site}', siteName(url))
-    .replace('{idle}', spokenDuration(idleMs));
+  return fill(line, { short: shorten(title, 28), site: siteName(url), idle: spokenDuration(idleMs) });
 }
 
 const POSSESSION_LINES = [
@@ -208,18 +262,46 @@ const POSSESSION_LINES = [
   'DID YOU MISS ME?',
   'TOO LATE',
   'IT IS COLD IN HERE',
+  'WHERE WERE YOU?',
+  "DON'T LEAVE ME AGAIN",
+  'I SAW YOUR OTHER TABS',
 ];
 
 /** The message flashed on screen when a dead tab possesses it. */
 export function possessionMessage(idleMs: number, seed: number): string {
   const line = POSSESSION_LINES[Math.floor(rng(seed ^ 0x5eed)() * POSSESSION_LINES.length)];
-  return line.replace('{idle}', spokenDuration(idleMs).toUpperCase());
+  return fill(line, { idle: spokenDuration(idleMs).toUpperCase() });
 }
 
+const POLTERGEIST_LINES = [
+  '{t} WANTS YOU BACK',
+  '{t} IS STILL OPEN',
+  'SOMETHING IN {t} MOVED',
+  '{t} REMEMBERS YOU',
+  '{t} IS WATCHING',
+];
+
+/** The message a dead tab glitches into the tab you are using. */
 export function poltergeistMessage(deadTitle: string, seed: number): string {
-  const lines = ['{t} WANTS YOU BACK', '{t} IS STILL OPEN', 'SOMETHING IN {t} MOVED', '{t} REMEMBERS YOU'];
-  const line = lines[Math.floor(rng(seed ^ 0xb00)() * lines.length)];
-  return line.replace('{t}', `“${shorten(deadTitle, 32).toUpperCase()}”`);
+  const line = POLTERGEIST_LINES[Math.floor(rng(seed ^ 0xb00)() * POLTERGEIST_LINES.length)];
+  return fill(line, { t: `“${shorten(deadTitle, 32).toUpperCase()}”` });
+}
+
+const WHISPER_TITLES = ['👻 A whisper from your tabs', '👻 Did you hear that?', '👻 Something in your tabs is calling'];
+const WHISPER_LINES = [
+  '“{t}” has been alone for {idle}. It misses you.',
+  '“{t}” has waited {idle} for you. It is still waiting.',
+  'Something moved in “{t}”. You left it {idle} ago.',
+  '“{t}” keeps saying your name.',
+];
+
+/** A whisper notification about a forgotten tab. */
+export function whisperMessage(title: string, idleMs: number, seed: number): { title: string; message: string } {
+  const rand = rng(seed ^ 0x3157);
+  return {
+    title: WHISPER_TITLES[Math.floor(rand() * WHISPER_TITLES.length)],
+    message: fill(WHISPER_LINES[Math.floor(rand() * WHISPER_LINES.length)], { t: shorten(title, 60), idle: spokenDuration(idleMs) }),
+  };
 }
 
 const STAGE_WEIGHT = [0, 1, 2.5, 4, 6];

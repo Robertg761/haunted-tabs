@@ -283,6 +283,32 @@ try {
   );
   const badge = await sw.evaluate(() => chrome.action.getBadgeText({}));
   check(badge === '', 'badge cleared');
+
+  // Chrome reports pushState and #hash changes as page loads. A dead tab that
+  // updates its own URL right after possessing you must not possess you twice.
+  await ask({ type: 'setSettings', settings: { enabled: true } });
+  await advance(130 * MIN);
+  await ask({ type: 'setSettings', settings: {} });
+  const plainPage = context.pages().find((p) => p.url() === `${origin}/plain`);
+  check(/^(💀|⚰️)/.test((await plainPage?.title()) ?? ''), `a resurrected tab can die again: "${await plainPage?.title()}"`);
+  const glitchShown = () => plainPage.evaluate(() => !!document.querySelector('[data-haunted-tabs="glitch"]'));
+  await plainPage.bringToFront();
+  check(await eventually(glitchShown, 2000), 'it possesses the screen when you return');
+  // The tab strip still shows the tombstone while the possession plays. It is not the page's name.
+  const midPossession = (await ask({ type: 'snapshot' })).tabs.find((t) => t.url === `${origin}/plain`);
+  check(midPossession?.title === 'Plain page', `the popup shows the real title mid-possession ("${midPossession?.title}")`);
+  check(await eventually(async () => !(await glitchShown()) && (await plainPage.title()) === 'Plain page', 4000), 'and lets go');
+  const plainWebs = () => plainPage.evaluate(() => Number(document.querySelector('[data-haunted-tabs="cobwebs"]')?.dataset.webs ?? 0));
+  const websAfterVisit = await eventually(plainWebs, 2000);
+  await plainPage.evaluate(() => history.replaceState({ view: 1 }, '', location.href));
+  await plainPage.evaluate(() => history.pushState({}, '', '/plain?view=2'));
+  await plainPage.evaluate(() => (location.hash = 'section'));
+  check(!(await eventually(glitchShown, 2500)), 'a replaceState, pushState or #hash change straight after does not possess it again');
+  check((await plainWebs()) <= websAfterVisit, `nor lay a second set of webs (${websAfterVisit} → ${await plainWebs()})`);
+  check((await plainPage.title()) === 'Plain page', 'the page keeps its real title');
+  const later = (await ask({ type: 'snapshot' })).tabs.find((t) => t.url.startsWith(`${origin}/plain`));
+  check(later?.title === 'Plain page', `and the popup remembers it ("${later?.title}")`);
+  await ask({ type: 'exorcise' });
 } catch (err) {
   console.error(err);
   failures++;
