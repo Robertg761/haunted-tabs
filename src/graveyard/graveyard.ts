@@ -4,6 +4,7 @@ import { ext } from '../shared/ext';
 import { Particles } from './particles';
 import { nearRidgeY, startScene } from './scene';
 import { buildBlankStone, buildGrave, drawStone, traitsFor, type Traits } from './stone';
+import { svgNode } from './svg';
 
 const gravesEl = document.getElementById('graves')!;
 const searchInput = document.getElementById('search') as HTMLInputElement;
@@ -278,8 +279,7 @@ function showEmptyScene(): void {
   if (!plot.firstChild) {
     const blank = buildBlankStone();
     traitsOf.set(blank, { seed: 7, shape: 'round', material: 'granite', tilt: -1.6, sink: 4, width: 1, age: 0.7, candleLeft: false });
-    plot.innerHTML = SHOVEL;
-    plot.prepend(blank);
+    plot.replaceChildren(blank, svgNode(SHOVEL));
     sizes.observe(blank.querySelector('.carving')!);
   }
   emptyEl.hidden = false;
