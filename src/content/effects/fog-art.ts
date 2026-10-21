@@ -92,6 +92,42 @@ export function coarseField(w: number, h: number, step: number, f: (x: number, y
   return out;
 }
 
+/**
+ * A 0/1 mask on a w*h lattice made soft: grown by one sample, then blurred twice, so it
+ * feathers out over about three samples instead of stepping.
+ */
+export function featherMask(src: Float32Array, w: number, h: number): Float32Array {
+  const grow = new Float32Array(w * h);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      let v = 0;
+      for (let yy = Math.max(0, y - 1); yy <= Math.min(h - 1, y + 1) && !v; yy++) {
+        for (let xx = Math.max(0, x - 1); xx <= Math.min(w - 1, x + 1); xx++) if (src[yy * w + xx]) v = 1;
+      }
+      grow[y * w + x] = v;
+    }
+  }
+  let a = grow;
+  let b = new Float32Array(w * h);
+  for (let pass = 0; pass < 2; pass++) {
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        let sum = 0;
+        let n = 0;
+        for (let yy = Math.max(0, y - 1); yy <= Math.min(h - 1, y + 1); yy++) {
+          for (let xx = Math.max(0, x - 1); xx <= Math.min(w - 1, x + 1); xx++) {
+            sum += a[yy * w + xx];
+            n++;
+          }
+        }
+        b[y * w + x] = sum / n;
+      }
+    }
+    [a, b] = [b, a];
+  }
+  return a;
+}
+
 function makeCanvas(w: number, h: number): HTMLCanvasElement {
   const c = document.createElement('canvas');
   c.width = Math.max(1, Math.round(w));
@@ -220,11 +256,13 @@ export function fogTextureJob(o: TextureOptions): { canvas: HTMLCanvasElement; s
       }
     }
   };
-  // Upscale in horizontal bands (clipped, so no seams) to keep each step short.
+  // Upscale in horizontal bands to keep each step short. Band edges are whole pixels that meet
+  // exactly: an overlapping row would be painted twice and show as a faint line across the fog.
   const band = (from: number, to: number, paint: () => void) => () => {
+    const y0 = Math.round(h * from);
     g.save();
     g.beginPath();
-    g.rect(0, Math.floor(h * from), w, Math.ceil(h * (to - from)) + 1);
+    g.rect(0, y0, w, Math.round(h * to) - y0);
     g.clip();
     paint();
     g.restore();

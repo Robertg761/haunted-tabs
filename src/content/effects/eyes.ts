@@ -9,8 +9,8 @@
 // If nowhere is empty, nothing opens: the eyes never cover the page's content.
 
 import type { Effect, EffectContext } from './types';
-import { createOverlay, seeded, type Overlay } from './overlay';
-import { EYE_BOX, Scan, Search, densifySpot, pageIsDark, stillFree, viewportSize, type PlaceOptions, type Rect, type Spot } from './eyes-place';
+import { areasTaken, claimAreas, createOverlay, seeded, type Area, type Overlay } from './overlay';
+import { EYE_BOX, POOL_REACH, Scan, Search, densifySpot, pageIsDark, stillFree, viewportSize, type PlaceOptions, type Rect, type Spot } from './eyes-place';
 import { PALETTES, SCLERA_BOX, SOFT, paintDab, paintIris, paintPoolCore, paintPupil, paintSclera, type Palette } from './eyes-paint';
 
 const LIFETIME = 45_000;
@@ -177,6 +177,8 @@ class Watcher {
   private phaseT = 0;
   private revealed = false;
   private pool = 0;
+  /** The far pair's darkness: follows its lids parting (blinks aside), eased. */
+  private farDark = 0;
   private env0 = 0;
   /** How wide they fly in the instant before they shut (only eyes that were really open). */
   private startle = 1.1;
@@ -236,7 +238,7 @@ class Watcher {
   private highlight: HTMLCanvasElement | null = null;
   private glow: HTMLCanvasElement | null = null;
   private socket: HTMLCanvasElement | null = null;
-  private readonly core: HTMLCanvasElement;
+  private core: HTMLCanvasElement | null = null;
   private readonly tail: HTMLCanvasElement;
   private coreA = 0.95;
   private tailA = 0.08;
@@ -293,7 +295,6 @@ class Watcher {
     odd.lag = 10 + r() * 14;
     this.eyes[r() < 0.5 ? 0 : 1].droop = 0.92 + r() * 0.05;
     this.wander = r() * 100;
-    this.core = paintPoolCore(128, [6, 5, 10], r);
     this.tail = paintDab(96, [6, 5, 10], SOFT);
   }
 
@@ -335,6 +336,7 @@ class Watcher {
       e.dil = 0.62;
       e.up = 0;
     }
+    this.farDark = 0;
     this.lastDraw = this.lastPoolDraw = -Infinity;
     this.poolStyle = '';
     this.poolOpacity = -1;
@@ -386,6 +388,23 @@ class Watcher {
     this.phase = kind === 'retreat' ? 'retreating' : 'closing';
     this.phaseT = this.host.clock;
     this.blinkAt = this.squintAt = -1e9;
+  }
+
+  /**
+   * Asked back while closing for a stop: finish shutting as if chased off, then
+   * open again later. Pairs that had already gone wait to open again.
+   */
+  revive(reopenIn: number): void {
+    this.final = false;
+    if (this.phase === 'closing') {
+      this.phase = 'retreating';
+      this.reopenDelay = reopenIn;
+    } else if (this.phase === 'done') {
+      this.phase = 'waiting';
+      this.planState = 'none';
+      this.plan = null;
+      this.wakeAt = this.main ? this.host.clock + reopenIn : Infinity;
+    }
   }
 
   private hide(): void {
@@ -457,7 +476,9 @@ class Watcher {
     // A light page needs a deep core to read and only a whisper of dimming around it;
     // a dark page takes a broader, softer shadow.
     this.coreA = (plan.dark ? 0.9 : 0.96) * (this.main ? 1 : 0.9);
-    this.tailA = plan.dark ? 0.32 : 0.075;
+    this.tailA = plan.dark ? 0.32 : 0.13;
+    // Painted for this size, at the pool canvas's resolution, so its grain is round.
+    this.core = paintPoolCore(5.5 * w * POOL_RES, 2.2 * w * POOL_RES, [6, 5, 10], rand);
 
     this.ew = Math.ceil(EYES_W * w);
     this.eh = Math.ceil(EYES_H * w);
@@ -575,6 +596,7 @@ class Watcher {
       }
     }
     this.pool = pool;
+    if (!this.main) this.farDark += (smooth(clamp01(env / SLIT)) - this.farDark) * (1 - Math.exp(-dt / 0.25));
 
     // Blinks, double blinks, slow knowing blinks and the occasional squint.
     if (this.phase === 'watching' && now >= this.nextBlink) {
@@ -708,7 +730,7 @@ class Watcher {
       const b = this.blinkFactor(now - this.blinkAt - e.lag);
       let up = env * b * (1 - 0.36 * squint) * e.droop;
       // Startle: they fly wide for an instant before they shut.
-      if (this.phase === 'retreating' && !reduced && t < 45) up = lerp(this.env0, this.startle, t / 45) * e.droop;
+      if (this.phase === 'retreating' && this.closeKind === 'retreat' && !reduced && t < 45) up =lerp(this.env0, this.startle, t / 45) * e.droop;
       e.up = up;
       e.lo = clamp01(lerp(0.68, 1, Math.min(1, (env / REST) * b)) - 0.46 * squint);
 
@@ -821,7 +843,8 @@ class Watcher {
     g.globalAlpha = 1;
     g.globalCompositeOperation = 'source-over';
     g.clearRect(0, 0, this.eyeC.width, this.eyeC.height);
-    const A = this.alpha * smooth(clamp01((this.pool - 0.5) / 0.42));
+    // The far pair's eyes and darkness arrive and leave together.
+    const A = this.alpha * smooth(clamp01((this.pool - 0.5) / 0.42)) * (this.main ? 1 : this.farDark);
     if (A <= 0.003) return;
     g.setTransform(dpr, 0, 0, dpr, (dpr * this.ew) / 2, (dpr * this.eh) / 2);
     for (const e of this.eyes) this.drawEye(e, A);
@@ -850,15 +873,20 @@ class Watcher {
     let oy = 0;
     let op: number;
     if (dissolving) {
-      // It contracts and sinks away rather than spreading into grey.
-      s = 0.35 + 0.65 * p;
-      oy = (1 - p) * 0.3 * this.w;
-      op = smooth(Math.min(1, p * 1.8));
+      // It thins and sinks away, mostly gone before it has shrunk much, so it
+      // never ends as a small grey pebble.
+      s = 0.6 + 0.4 * p;
+      oy = (1 - p) * 0.25 * this.w;
+      op = smooth(clamp01((p - 0.1) / 0.6));
     } else {
-      // It seeps out from where the eyes will be.
-      s = 0.15 + 0.85 * easeOutCubic(p);
-      op = smooth(Math.min(1, p * 3));
+      // It condenses out of the air where the eyes will be: it thickens while
+      // it draws together, rather than inflating as a grey disc.
+      s = 0.55 + 0.45 * easeOutCubic(p);
+      op = smooth(Math.min(1, p * 1.5));
     }
+    // The far pair is mostly its eyes: its darkness gathers as the lids part and
+    // goes as they shut, so it is never a grey disc on its own. (Blinks do not count.)
+    if (!this.main) op *= this.farDark;
     const settled = this.phase === 'watching';
     // Slow breathing; while settled it only moves with the (rare) redraws below.
     if (settled && now - this.lastPoolDraw < 160) return;
@@ -881,14 +909,17 @@ class Watcher {
     g.setTransform(POOL_RES, 0, 0, POOL_RES, (POOL_RES * this.pw) / 2, (POOL_RES * this.ph) / 2);
     g.globalAlpha = this.tailA;
     g.drawImage(this.tail, -3.05 * w, -1.85 * w, 6.1 * w, 3.7 * w);
-    g.globalAlpha = this.coreA;
-    g.drawImage(this.core, -2.75 * w, -1.1 * w, 5.5 * w, 2.2 * w);
+    if (this.core) {
+      g.globalAlpha = this.coreA;
+      g.drawImage(this.core, -2.75 * w, -1.1 * w, 5.5 * w, 2.2 * w);
+    }
     const calm = this.host.reduced ? 0.4 : 1;
     for (const k of this.wisps) {
       const bx = k.x + Math.sin(now * k.fx + k.ph) * k.drift * calm;
       const by = k.y + Math.cos(now * k.fy + k.ph) * k.drift * 0.5 * calm;
+      // Smooth puffs: they shift the darkness slowly without smearing its grain.
       g.globalAlpha = this.coreA * k.a;
-      g.drawImage(this.core, bx - k.rx, by - k.ry, k.rx * 2, k.ry * 2);
+      g.drawImage(this.tail, bx - k.rx, by - k.ry, k.rx * 2, k.ry * 2);
     }
     g.globalAlpha = 1;
   }
@@ -897,7 +928,9 @@ class Watcher {
     const g = this.eyeG;
     const w = this.w;
     const m = e.side;
-    const lowerY = lerp(MEET, LOWER_OPEN, e.lo) * w;
+    // Shut means shut: as the upper lid comes down the lower one rises to meet it,
+    // so a closed eye leaves no sliver (it would show as two dark lines on a faint pool).
+    const lowerY = lerp(MEET, lerp(MEET, LOWER_OPEN, e.lo), smooth(clamp01(e.up / 0.12))) * w;
     const upperY = Math.min(lerp(MEET, UPPER_OPEN, e.up) * w, lowerY);
     const p0x = P0X * w;
     const p0y = P0Y * w;
@@ -1093,6 +1126,8 @@ export class Eyes implements Effect, Host {
   seed = 0;
   palette: Palette = PALETTES[0];
   clock = 0;
+  /** Clock time the current lifetime began (a revive starts a new one). */
+  private born = 0;
   rand: () => number = Math.random;
 
   private overlay: Overlay | null = null;
@@ -1111,6 +1146,7 @@ export class Eyes implements Effect, Host {
   private ending = false;
   private retreats = 0;
   private history: { x: number; y: number }[] = [];
+  private claimed = '';
 
   get active(): boolean {
     return !!this.overlay;
@@ -1130,6 +1166,23 @@ export class Eyes implements Effect, Host {
       }
       return;
     }
+    if (this.overlay && !this.paused) {
+      // Started again while fading out: the darkness on screen finishes closing
+      // and the eyes come back later, with a fresh lifetime, instead of the
+      // whole thing vanishing in one frame and starting over.
+      clearTimeout(this.stopTimer);
+      this.stopTimer = undefined;
+      this.stopping = this.ending = false;
+      this.born = this.clock;
+      this.retreats = 0;
+      for (const w of this.watchers) w.revive(1800 + this.rand() * 900);
+      if (ctx.stage >= 4 && this.stage < 4) {
+        this.stage = ctx.stage;
+        this.addSecondary();
+      }
+      this.schedule();
+      return;
+    }
     if (this.overlay) this.destroy();
     this.reduced = ctx.reduced;
     this.stage = ctx.stage;
@@ -1137,7 +1190,7 @@ export class Eyes implements Effect, Host {
     this.rand = seeded(this.seed ^ 0x9e3779b9);
     this.palette = PALETTES[this.seed % PALETTES.length];
     this.dpr = Math.min(2, devicePixelRatio || 1);
-    this.clock = 0;
+    this.clock = this.born = 0;
     this.lastReal = performance.now();
     this.paused = document.visibilityState === 'hidden';
     this.stopping = this.ending = false;
@@ -1189,6 +1242,7 @@ export class Eyes implements Effect, Host {
     document.removeEventListener('visibilitychange', this.onVisibility);
     for (const w of this.watchers) w.remove();
     this.watchers = [];
+    this.claim();
     this.scan = null;
     this.overlay?.remove();
     this.overlay = null;
@@ -1244,6 +1298,8 @@ export class Eyes implements Effect, Host {
     if (this.job || this.paused || this.stopping) return;
     w.planState = 'pending';
     const scan = this.scan && this.scan.fresh(15_000) ? this.scan : new Scan();
+    // Never open over another creature (a web, a drip's column).
+    scan.block(areasTaken(this.name));
     this.scan = scan;
     this.job = { w, scan, search: null, cands: null, k: 0, verifying: false };
     this.requestIdle();
@@ -1376,7 +1432,7 @@ export class Eyes implements Effect, Host {
     const dt = Math.min(0.05, Math.max(0, (now - prev) / 1000));
     const p = this.pointer;
     if (performance.now() - p.at > 120) p.vx = p.vy = 0;
-    if (!this.ending && !this.stopping && now > LIFETIME) {
+    if (!this.ending && !this.stopping && now - this.born > LIFETIME) {
       this.ending = true;
       this.cancelJob();
       for (const w of this.watchers) w.close('final');
@@ -1394,8 +1450,31 @@ export class Eyes implements Effect, Host {
       for (const w of this.watchers) if (w.phase === 'waiting' && w.wakeAt === Infinity) w.close('final');
     }
     for (const w of this.watchers) w.draw(now);
+    this.claim();
     this.schedule();
   };
+
+  /**
+   * Tell the other creatures where the darkness is, so drips and webs keep out
+   * of it. Only pairs that are opening or watching count; a retreat gives the
+   * ground back at once. Written only when something changed.
+   */
+  private claim(): void {
+    const areas: Area[] = [];
+    for (const w of this.watchers) {
+      if (w.phase !== 'revealing' && w.phase !== 'watching') continue;
+      areas.push({
+        x: Math.round(w.x - POOL_REACH.x * w.w),
+        y: Math.round(w.y - POOL_REACH.up * w.w),
+        w: Math.round(2 * POOL_REACH.x * w.w),
+        h: Math.round((POOL_REACH.up + POOL_REACH.down) * w.w),
+      });
+    }
+    const key = areas.map((a) => `${a.x},${a.y},${a.w},${a.h}`).join(';');
+    if (key === this.claimed) return;
+    this.claimed = key;
+    claimAreas(this.name, areas);
+  }
 
   private wake(w: Watcher, now: number): void {
     if (w.planState === 'none' && now >= w.wakeAt - PLAN_AHEAD) this.startPlan(w);
@@ -1425,7 +1504,7 @@ export class Eyes implements Effect, Host {
       return;
     }
     if (this.raf || this.calmTimer) return;
-    let next = this.ending || this.stopping ? this.clock : LIFETIME;
+    let next = this.ending || this.stopping ? this.clock : this.born + LIFETIME;
     for (const w of this.watchers) {
       if (w.phase !== 'waiting' || w.planState === 'pending') continue;
       next = Math.min(next, w.planState === 'none' ? w.wakeAt - PLAN_AHEAD : w.wakeAt);
@@ -1483,6 +1562,7 @@ export class Eyes implements Effect, Host {
         w.wakeAt = this.clock + 1500;
       }
     }
+    this.claim();
     this.hurry();
   };
 

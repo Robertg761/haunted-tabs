@@ -5,7 +5,7 @@
 // re-checked densely before they are used. If nowhere is truly empty, there is
 // no spot: the eyes never open over the page's content.
 
-import { OUR_ATTR } from './overlay';
+import { OUR_ATTR, type Area } from './overlay';
 
 const CELL = 16;
 const MAX_ELEMENTS = 1200;
@@ -130,6 +130,11 @@ export class Scan {
     this.hardSum = summed(this.hard, this.cols, this.rows);
     this.softSum = summed(this.soft, this.cols, this.rows);
     return true;
+  }
+
+  /** Other creatures' ground (a web, a drip's column): as good as content. */
+  block(areas: Area[]): void {
+    for (const a of areas) this.mark(a.x, a.y, a.x + a.w, a.y + a.h, 8, this.hard);
   }
 
   /** Queue a dense re-check of a rect (sub-grid sized things like icons and short links). */
@@ -270,13 +275,30 @@ export class Scan {
       for (let i = 0; i < rects.length; i++) this.mark(rects[i].left, rects[i].top, rects[i].right, rects[i].bottom, 12, this.hard);
     }
     // A box with its own background, picture or border (a banner, a card, an
-    // infobox) is no place for eyes; darkness spilling onto it is avoided too.
+    // infobox, a table cell, a header ruled off below) is no place for eyes;
+    // darkness spilling onto it is avoided too. A picture is content even when
+    // it is big (a poster, a player, a photo). A backdrop bigger than that
+    // (a hero, a sidebar) may hold the eyes, but not across its edge: darkness
+    // straddling the line between two colours looks like a smudge.
+    const cs = getComputedStyle(el);
+    const pictured = cs.backgroundImage !== 'none';
+    const painted =
+      pictured ||
+      alphaOf(cs.backgroundColor) > 0.05 ||
+      parseFloat(cs.borderTopWidth) > 0 ||
+      parseFloat(cs.borderRightWidth) > 0 ||
+      parseFloat(cs.borderBottomWidth) > 0 ||
+      parseFloat(cs.borderLeftWidth) > 0;
+    if (!painted) return;
     const r = el.getBoundingClientRect();
-    if (r.width * r.height < this.area * 0.3) {
-      const cs = getComputedStyle(el);
-      if (cs.backgroundImage !== 'none' || alphaOf(cs.backgroundColor) > 0.05 || parseFloat(cs.borderTopWidth) > 0 || parseFloat(cs.borderLeftWidth) > 0) {
-        this.mark(r.left, r.top, r.right, r.bottom, 8, this.soft);
-      }
+    const share = (r.width * r.height) / this.area;
+    if (share < 0.3 || (pictured && share < 0.6)) {
+      this.mark(r.left, r.top, r.right, r.bottom, 8, this.soft);
+    } else {
+      this.mark(r.left, r.top, r.right, r.top + 1, 12, this.soft);
+      this.mark(r.left, r.bottom - 1, r.right, r.bottom, 12, this.soft);
+      this.mark(r.left, r.top, r.left + 1, r.bottom, 12, this.soft);
+      this.mark(r.right - 1, r.top, r.right, r.bottom, 12, this.soft);
     }
   }
 }

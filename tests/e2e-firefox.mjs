@@ -224,6 +224,8 @@ try {
   const webbed = reloaded && (await eventually(() => reloaded.evaluate(() => Number(document.querySelector('[data-haunted-tabs="cobwebs"]')?.dataset.webs ?? 0) > 0).catch(() => false), 8000));
   check(webbed, 'cobwebs still appear after the reload');
   check(reloaded && (await eventually(async () => (await reloaded.title()) === 'Plain page', 5000)), 'and the real title comes back');
+  const plainView = (await ask({ type: 'snapshot' })).tabs.find((t) => t.url === `${origin}/plain`);
+  check(plainView?.title === 'Plain page', `the popup never mistakes the painted title for the real one ("${plainView?.title}")`);
 } catch (err) {
   console.error(err);
   failures++;

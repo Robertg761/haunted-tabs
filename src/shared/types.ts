@@ -66,6 +66,8 @@ export interface TabRecord {
   /** Stage currently painted onto the page. */
   applied: Stage;
   appliedTitle?: string;
+  /** The last title we painted. Kept after a restore: the tab strip can show it a moment longer. */
+  lastPaint?: string;
   realTitle?: string;
   realFavIconUrl?: string;
   /** Set when we discarded the tab after checking it had no unsaved input. */
@@ -82,6 +84,8 @@ export interface TabRecord {
   pendingReturn?: { stage: Stage; idle: number; at: number; url?: string };
   /** The visit that just played, in case the page reloads straight after. */
   lastReturn?: { stage: Stage; idle: number; at: number };
+  /** When the tab started loading. Cleared once the load completes. */
+  loadingAt?: number;
   seed: number;
 }
 
@@ -135,9 +139,12 @@ export type PopupRequest =
   | { type: 'snapshot' }
   | { type: 'setSettings'; settings: Partial<Settings> }
   | { type: 'exorcise' }
-  | { type: 'bury'; tabId: number }
+  /** `force` closes a tab that could not be checked for unsaved input (never one known to have some). */
+  | { type: 'bury'; tabId: number; force?: boolean }
   | { type: 'discard'; tabId: number }
   | { type: 'switch'; tabId: number }
+  /** Remove graves (resurrected or laid to rest), in the same queue as burials so none is lost. */
+  | { type: 'removeGraves'; ids: string[] }
   /** Sent while a permission prompt is open: apply these settings once it is granted. */
   | { type: 'armPermission'; settings: Partial<Settings> };
 

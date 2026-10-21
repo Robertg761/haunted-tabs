@@ -15,9 +15,9 @@
 // lifts. The animation sleeps whenever nothing is changing and while the tab is hidden.
 
 import type { Effect, EffectContext } from './types';
-import { createOverlay, OUR_ATTR, seeded, type Overlay } from './overlay';
+import { areasTaken, claimAreas, createOverlay, OUR_ATTR, seeded, type Overlay } from './overlay';
 import {
-  buildHand, buildWord, clamp01, coarseField, dropSprite, fogTextureJob, Noise, smoothstep,
+  buildHand, buildWord, clamp01, coarseField, dropSprite, featherMask, fogTextureJob, Noise, smoothstep,
   type Grid, type Imprint, type Palette, type Rand,
 } from './fog-art';
 
@@ -53,6 +53,8 @@ const CENTRE = [0, 0, 0.035, 0.09, 0.14];
 const TOP_BAND = 64;
 const TOP_FEATHER = 64;
 const RIME_LINE = 6;
+/** How far down (CSS px) the band's lower edge may wander. */
+const TOP_WANDER = 48;
 
 /** The most fog allowed at height y (CSS px) for a page whose band cap is `cap`. */
 function topCap(y: number, cap: number): number {
@@ -64,6 +66,8 @@ function topCap(y: number, cap: number): number {
 interface Look {
   palette: Palette;
   edgeCap: number;
+  /** Fog cap over text and controls, so reading matter keeps about 3:1 contrast. */
+  textCap: number;
   /** Fog cap over the header band: light pages need far less fog for the same contrast loss. */
   topCap: number;
   bloom: number;
@@ -135,7 +139,12 @@ export class Fog implements Effect {
   private Tfrom: Float32Array | null = null; // stage change: blend from these targets...
   private Tto: Float32Array | null = null; // ...to these
   private blendT = 0;
+  /** Seconds a change of targets takes to blend in. */
+  private blendDur = 3;
   private targetMass = 1;
+  /** Where the page has text or controls under the glass (0..1 per cell, feathered), or null before the probe. */
+  private busy: Float32Array | null = null;
+  private scrollTimer: number | undefined;
 
   // Time and state.
   private simT = 0;
@@ -154,6 +163,9 @@ export class Fog implements Effect {
   private resizeTimer: number | undefined;
   private texTimer: number | undefined;
   private jobTimer: number | undefined;
+  private themeTimer: number | undefined;
+  private themeObserver: MutationObserver | null = null;
+  private scheme: MediaQueryList | null = null;
   private jobId = 0;
   private tilesPending = false;
   private rimCount = new Int32Array(0);
@@ -263,8 +275,16 @@ export class Fog implements Effect {
     addEventListener('keydown', this.onWork, { passive: true });
     addEventListener('wheel', this.onWheel, { passive: true });
     addEventListener('resize', this.onResize, { passive: true });
+    document.addEventListener('scroll', this.onScroll, { passive: true, capture: true });
     document.addEventListener('visibilitychange', this.onVisibility);
     this.visible = document.visibilityState === 'visible';
+    // Follow the page if it switches between light and dark: pale fog on a page gone dark would bury its text.
+    this.themeObserver = new MutationObserver(this.onTheme);
+    const themeOpts = { attributes: true, attributeFilter: ['class', 'style', 'data-theme', 'data-color-mode', 'data-bs-theme'] };
+    this.themeObserver.observe(document.documentElement, themeOpts);
+    if (document.body) this.themeObserver.observe(document.body, themeOpts);
+    this.scheme = matchMedia('(prefers-color-scheme: dark)');
+    this.scheme.addEventListener('change', this.onTheme);
 
     // Left alone, the glass slowly warms up and the fog lifts by itself within a couple of minutes.
     this.ambientTimer = window.setInterval(() => {
@@ -295,14 +315,21 @@ export class Fog implements Effect {
     clearTimeout(this.resizeTimer);
     clearTimeout(this.texTimer);
     clearTimeout(this.jobTimer);
+    clearTimeout(this.themeTimer);
+    clearTimeout(this.scrollTimer);
     clearInterval(this.ambientTimer);
-    this.stopTimer = this.appTimer = this.resizeTimer = this.texTimer = this.jobTimer = this.ambientTimer = undefined;
+    this.stopTimer = this.appTimer = this.resizeTimer = this.texTimer = this.jobTimer = this.ambientTimer = this.themeTimer = this.scrollTimer = undefined;
+    this.themeObserver?.disconnect();
+    this.themeObserver = null;
+    this.scheme?.removeEventListener('change', this.onTheme);
+    this.scheme = null;
     this.jobId++;
     removeEventListener('pointermove', this.onPointer);
     removeEventListener('pointerdown', this.onWork);
     removeEventListener('keydown', this.onWork);
     removeEventListener('wheel', this.onWheel);
     removeEventListener('resize', this.onResize);
+    document.removeEventListener('scroll', this.onScroll, { capture: true });
     document.removeEventListener('visibilitychange', this.onVisibility);
     // Release the bitmaps now rather than whenever the garbage collector gets to them.
     for (const t of this.tiles) for (const c of t.cv) c.width = c.height = 0;
@@ -315,7 +342,8 @@ export class Fog implements Effect {
     this.texJob = null;
     this.maskImg = this.rimImg = null;
     this.app = null;
-    this.bloomMap = this.Tfrom = this.Tto = null;
+    claimAreas('fog', []);
+    this.bloomMap = this.Tfrom = this.Tto = this.busy = null;
     this.stopping = false;
     this.bLive.fill(0);
     this.rLive.fill(0);
@@ -367,6 +395,7 @@ export class Fog implements Effect {
     this.wet = new Float32Array(n);
     this.bloomMap = this.Tfrom = this.Tto = null;
     this.app = null;
+    claimAreas('fog', []);
     // Until the new targets are worked out (in short slices), stand in with the old ones or nothing.
     this.T = new Float32Array(n);
     this.order = new Float32Array(n).fill(1);
@@ -417,12 +446,71 @@ export class Fog implements Effect {
       rd[i + 2] = rb;
     }
     this.layoutTiles();
+    // Find the reading matter first, so the fog thins over it from the very first frame.
+    this.probeJob(() =>
+      this.targetsJob(this.stage, (T, order, rate, mass) => {
+        this.T = T;
+        this.order = order;
+        this.rate = rate;
+        this.targetMass = mass;
+        this.runTexture();
+      }),
+    );
+  }
+
+  /**
+   * Where the page has text or controls, on a lattice of about 16 CSS px, probed in short
+   * slices and feathered into a soft mask: frost stays full over empty space and thins over
+   * what someone may need to read, without hard-edged holes.
+   */
+  private probeJob(done: () => void): void {
+    clearTimeout(this.jobTimer);
+    const id = ++this.jobId;
+    const { cols, rows, cell } = this.grid;
+    const k = Math.max(1, Math.round(16 / cell));
+    const lw = Math.ceil((cols - 1) / k) + 2;
+    const lh = Math.ceil((rows - 1) / k) + 2;
+    const lat = new Float32Array(lw * lh);
+    const probe = readingMatter(k * cell);
+    let n = 0;
+    const run = () => {
+      this.jobTimer = undefined;
+      if (!this.overlay || id !== this.jobId) {
+        probe.release();
+        return;
+      }
+      const t0 = performance.now();
+      while (n < lat.length && performance.now() - t0 < 6) {
+        for (let m = 0; m < 8 && n < lat.length; m++, n++) {
+          const x = ((n % lw) * k + 0.5) * cell;
+          const y = (((n / lw) | 0) * k + 0.5) * cell;
+          lat[n] = x < this.vw && y < this.vh && probe.at(x, y) ? 1 : 0;
+        }
+      }
+      if (n < lat.length) {
+        this.jobTimer = window.setTimeout(run, 0);
+        return;
+      }
+      probe.release();
+      const soft = featherMask(lat, lw, lh);
+      this.busy = coarseField(cols, rows, k, (x, y) => soft[(y / k) * lw + x / k]);
+      done();
+    };
+    this.jobTimer = window.setTimeout(run, 0);
+  }
+
+  /** Work out new targets (a higher stage, or text moved under the glass) and blend them in over `seconds`. */
+  private retarget(seconds: number): void {
     this.targetsJob(this.stage, (T, order, rate, mass) => {
-      this.T = T;
+      this.Tfrom = this.T.slice();
+      this.Tto = T;
+      this.T = this.Tfrom.slice();
       this.order = order;
       this.rate = rate;
       this.targetMass = mass;
-      this.runTexture();
+      this.blendT = 0;
+      this.blendDur = seconds;
+      this.wake();
     });
   }
 
@@ -448,6 +536,7 @@ export class Fog implements Effect {
     const reachSide = Math.min(reachBottom, 0.22 * vw + 20);
     const centre = CENTRE[stage] * (look.palette.dark ? 0.85 : 1);
     const cap = look.edgeCap;
+    const busy = this.busy && this.busy.length === cols * rows ? this.busy : null;
     const T = new Float32Array(n);
     const order = new Float32Array(n);
     const rate = new Float32Array(n);
@@ -466,8 +555,14 @@ export class Fog implements Effect {
           const py = (y + 0.5) * cell;
           const ny = Math.max(0.004, Math.min(py / reachTop, (vh - py) / reachBottom));
           const ay = 1 / (ny * ny);
-          const capY = Math.min(cap, topCap(py, look.topCap));
+          const capRow = Math.min(cap, topCap(py, look.topCap));
+          const nearTop = py > TOP_BAND && py < TOP_BAND + TOP_FEATHER + TOP_WANDER;
           for (let x = 0, i = y * cols; x < cols; x++, i++) {
+            // The lower edge of the clearer top band wanders, and only ever downwards (the header
+            // keeps its contrast): a ruler-straight line across a colourful page reads as a seam.
+            let capY = nearTop ? Math.min(cap, topCap(Math.max(TOP_BAND, py - TOP_WANDER * clamp01((mid[i] - 0.2) / 0.6)), look.topCap)) : capRow;
+            // Over text and controls the frost thins to what keeps them readable.
+            if (busy && busy[i] > 0) capY = Math.min(capY, cap - (cap - look.textCap) * busy[i]);
             const px = (x + 0.5) * cell;
             const nx = Math.max(0.004, Math.min(px, vw - px) / reachSide);
             // Distance to the frame in units of reach, rounded off at the corners; corners also reach further in.
@@ -586,16 +681,7 @@ export class Fog implements Effect {
       this.build(true); // still building: start over with the new stage
       return;
     }
-    this.targetsJob(stage, (T, order, rate, mass) => {
-      this.Tfrom = this.T.slice();
-      this.Tto = T;
-      this.T = this.Tfrom.slice();
-      this.order = order;
-      this.rate = rate;
-      this.targetMass = mass;
-      this.blendT = 0;
-      this.wake();
-    });
+    this.retarget(3);
   }
 
   // --- events ------------------------------------------------------------------
@@ -635,6 +721,27 @@ export class Fog implements Effect {
     this.applyOpacity(2.5);
   };
 
+  /**
+   * The fog is on the glass and stays put, but the text under it moves: once scrolling
+   * rests, find the reading matter again and let the frost settle around it.
+   */
+  private onScroll = (): void => {
+    if (this.stopping || !this.overlay) return;
+    clearTimeout(this.scrollTimer);
+    this.scrollTimer = window.setTimeout(this.reprobe, 450);
+  };
+
+  private reprobe = (): void => {
+    this.scrollTimer = undefined;
+    if (!this.overlay || this.stopping) return;
+    if (this.jobTimer !== undefined || !this.tex) {
+      // Still building: look again once it is done.
+      this.scrollTimer = window.setTimeout(this.reprobe, 450);
+      return;
+    }
+    this.probeJob(() => this.retarget(1.4));
+  };
+
   private onResize = (): void => {
     clearTimeout(this.resizeTimer);
     this.resizeTimer = window.setTimeout(() => {
@@ -642,6 +749,21 @@ export class Fog implements Effect {
       this.build(true);
       this.wake();
     }, 250);
+  };
+
+  private onTheme = (): void => {
+    // At most a few checks a second, however busily the page rewrites its classes.
+    if (this.themeTimer !== undefined || !this.overlay) return;
+    this.themeTimer = window.setTimeout(() => {
+      this.themeTimer = undefined;
+      if (!this.overlay || this.stopping) return;
+      const look = pickLook();
+      if (look.palette.dark === this.look!.palette.dark) return;
+      // Same wiped state and water, redrawn in the new page's colours.
+      this.look = look;
+      this.build(true);
+      this.wake();
+    }, 300);
   };
 
   private onVisibility = (): void => {
@@ -721,7 +843,7 @@ export class Fog implements Effect {
     const bstr = this.look!.bloom;
     const from = this.Tfrom;
     const to = this.Tto;
-    const blend = from && to ? smoothstep(0, 3, this.blendT) : 0;
+    const blend = from && to ? smoothstep(0, this.blendDur, this.blendT) : 0;
     const tcols = this.tcols;
     const tcell = this.tcell;
     const toc = this.tileOfCol;
@@ -1297,6 +1419,7 @@ export class Fog implements Effect {
     const vh = this.vh;
     const m = 20;
     if (hw * 2 + m * 2 > vw || hh * 2 + m * 2 > vh) return null;
+    const taken = areasTaken('fog');
     const cands: [number, number, number][] = [];
     for (let j = 0; j < 5; j++) {
       for (let i = 0; i < 7; i++) {
@@ -1305,6 +1428,8 @@ export class Fog implements Effect {
         let fog = 0;
         for (let k = 0; k < 5; k++) fog += this.fogAt(x + hw * (k / 2 - 1) * 0.8, y + hh * ((k % 3) - 1) * 0.6);
         const away = Math.min(1, (120 + Math.hypot(x - this.p1x, y - this.p1y)) / 600);
+        // Never where another creature has settled (the eyes' darkness, a web, a drip's run).
+        if (taken.some((a) => x + hw > a.x && x - hw < a.x + a.w && y + hh > a.y && y - hh < a.y + a.h)) continue;
         cands.push([x, y, (fog / 5) * (0.5 + 0.5 * away) * (0.85 + 0.3 * this.rand())]);
       }
     }
@@ -1354,6 +1479,7 @@ export class Fog implements Effect {
       for (let i = 2; i < imp.beads.length; i += 4) imp.beads[i] = 1 + (i % 7) * 0.2;
     }
     this.app = imp;
+    claimAreas('fog', [{ x: imp.cx - imp.rx, y: imp.cy - imp.ry, w: imp.rx * 2, h: imp.ry * 2 }]);
     this.appT = 0;
     this.appBead = 0;
     this.appDrip = 0;
@@ -1425,6 +1551,7 @@ export class Fog implements Effect {
     if (this.appT > this.appRelease + 12.5) {
       this.app = null;
       this.bloomMap = null;
+      claimAreas('fog', []);
     }
   }
 }
@@ -1444,12 +1571,83 @@ function busyAt(x: number, y: number, imagesOk: boolean): number {
   return 0;
 }
 
-/** Fog is lighter than a dark page and a touch greyer and cooler than a white one, so it shows on both. */
+const CONTROL = /^(INPUT|TEXTAREA|SELECT|BUTTON)$/;
+
+/**
+ * A prober for reading matter: at(x, y) is true when a glyph lies within `reach` / 2 of the
+ * point (caret hit testing, then the character's own box), or a control is there.
+ */
+function readingMatter(reach: number): { at(x: number, y: number): boolean; release(): void } {
+  const doc = document as Document & {
+    caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null;
+    caretRangeFromPoint?: (x: number, y: number) => Range | null;
+  };
+  const range = document.createRange();
+  const m = reach / 2 + 2;
+  const textAt = (x: number, y: number): boolean => {
+    let node: Node | null | undefined;
+    let off = 0;
+    if (doc.caretPositionFromPoint) {
+      const p = doc.caretPositionFromPoint(x, y);
+      node = p?.offsetNode;
+      off = p?.offset ?? 0;
+    } else if (doc.caretRangeFromPoint) {
+      const r = doc.caretRangeFromPoint(x, y);
+      node = r?.startContainer;
+      off = r?.startOffset ?? 0;
+    }
+    if (!node || node.nodeType !== Node.TEXT_NODE) return false;
+    const text = node.textContent ?? '';
+    for (let o = off - 1; o <= off; o++) {
+      if (o < 0 || o >= text.length || /\s/.test(text[o])) continue;
+      range.setStart(node, o);
+      range.setEnd(node, o + 1);
+      const r = range.getBoundingClientRect();
+      if (x >= r.left - m && x <= r.right + m && y >= r.top - m && y <= r.bottom + m) return true;
+    }
+    return false;
+  };
+  return {
+    at(x, y) {
+      try {
+        if (textAt(x, y)) return true;
+        const el = document.elementFromPoint(x, y);
+        if (!el || el.closest(`[${OUR_ATTR}]`)) return false;
+        return CONTROL.test(el.tagName.toUpperCase()) || (el as HTMLElement).isContentEditable || el.getAttribute('role') === 'button';
+      } catch {
+        return false;
+      }
+    },
+    release: () => range.detach(),
+  };
+}
+
+/** Fog is a smoky veil on a dark page and a touch greyer and cooler than a white one, so it shows on both. */
 function pickLook(): Look {
   const dark = pageIsDark();
   return dark
-    ? { palette: { dark, lo: [104, 114, 126], hi: [196, 204, 214] }, edgeCap: 0.7, topCap: 0.3, bloom: 0.66, rim: '214,224,234', rimAlpha: 0.1 }
-    : { palette: { dark, lo: [178, 189, 203], hi: [236, 241, 247] }, edgeCap: 0.9, topCap: 0.12, bloom: 0.92, rim: '58,74,94', rimAlpha: 0.14 };
+    ? // Dark glass at night: a smoky veil that lifts near-black by only a few percent; the frost
+      // crystals, rime and beads catch the light instead.
+      { palette: { dark, lo: [26, 30, 37], hi: [66, 73, 84] }, edgeCap: 0.72, textCap: 0.42, topCap: 0.32, bloom: 0.72, rim: '214,224,234', rimAlpha: 0.12 }
+    : { palette: { dark, lo: [178, 189, 203], hi: [236, 241, 247] }, edgeCap: 0.9, textCap: 0.28, topCap: 0.12, bloom: 0.92, rim: '58,74,94', rimAlpha: 0.14 };
+}
+
+/**
+ * A root filtered with invert() (Dark Reader's filter mode, "night mode" sites) shows the
+ * opposite of its colours. Our host is lifted out of that filter, so judge what is on screen.
+ */
+function rootInverted(): boolean {
+  try {
+    const m = /invert\(\s*([\d.]+)(%?)\s*\)/.exec(getComputedStyle(document.documentElement).filter);
+    return !!m && Number(m[1]) / (m[2] ? 100 : 1) > 0.5;
+  } catch {
+    return false;
+  }
+}
+
+/** Is the page, as it shows on screen, mostly dark? */
+function pageIsDark(): boolean {
+  return pageIsDarkRaw() !== rootInverted();
 }
 
 /**
@@ -1457,7 +1655,7 @@ function pickLook(): Look {
  * background. Colours are resolved by painting them into a 1x1 canvas, so oklch(),
  * lab() and friends work. Transparent or image-only backgrounds count as unknown.
  */
-function pageIsDark(): boolean {
+function pageIsDarkRaw(): boolean {
   const probe = document.createElement('canvas');
   probe.width = probe.height = 1;
   const pg = probe.getContext('2d', { willReadFrequently: true });

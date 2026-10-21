@@ -7,6 +7,7 @@ import { formatIdle, siteName } from '../shared/haunt';
 import type { Grave } from '../shared/types';
 import { el, faviconUrl } from '../shared/ui';
 import { between, hashString, n1, pick, seeded, type Rand } from './rand';
+import { setSvg } from './svg';
 
 export const SHAPES = ['round', 'shoulder', 'gothic', 'cross', 'obelisk', 'pediment', 'tablet'] as const;
 export type Shape = (typeof SHAPES)[number];
@@ -82,7 +83,7 @@ export function buildGrave(g: Grave, t: Traits): HTMLElement {
             { class: 'inscription' },
             el('p', { class: 'rip', text: g.cause === 'haunting' ? 'Here lies' : 'At rest' }),
             el('span', { class: 'inlay' }, fav),
-            el('h2', { class: 'name', title: g.title, dir: 'auto', text: g.title }),
+            el('h2', { class: 'name', title: g.title, dir: 'auto' }, ...breakable(g.title)),
             // Not a tab stop: opening the page from here would leave its grave behind (Resurrect does both).
             el('a', { class: 'site', href: g.url, title: g.url, target: '_blank', rel: 'noreferrer', dir: 'auto', tabindex: '-1', text: siteName(g.url) }),
             el('span', { class: 'rule', 'aria-hidden': 'true' }),
@@ -114,6 +115,27 @@ export function buildGrave(g: Grave, t: Traits): HTMLElement {
   return article;
 }
 
+/**
+ * A title with soft break points after the punctuation inside long runs (emails, paths,
+ * repo names), so a narrow stone wraps "robert@" / "example.com" rather than mid-word.
+ */
+function breakable(title: string): (string | Node)[] {
+  const out: (string | Node)[] = [];
+  for (const part of title.split(/(\s+)/)) {
+    if (part.length < 14 || /\s/.test(part)) {
+      out.push(part);
+      continue;
+    }
+    // Not after dots: "example." / "com" reads worse than letting the line breaker decide.
+    const pieces = part.split(/(?<=[/@_?&=#:|·\\-])(?=[^/@_?&=#:|·\\-])/u);
+    pieces.forEach((piece, i) => {
+      out.push(piece);
+      if (i < pieces.length - 1) out.push(document.createElement('wbr'));
+    });
+  }
+  return out;
+}
+
 /** An unmarked stone for the empty yard. */
 export function buildBlankStone(): HTMLElement {
   return el(
@@ -140,7 +162,7 @@ function svgEl(cls: string): SVGSVGElement {
 function sparkIcon(): SVGSVGElement {
   const svg = svgEl('spark');
   svg.setAttribute('viewBox', '0 0 16 16');
-  svg.innerHTML = '<path d="M8 1.5l1.3 4.2L13.5 7 9.3 8.3 8 12.5 6.7 8.3 2.5 7l4.2-1.3z" fill="currentColor"/><circle cx="13" cy="12.5" r="1.1" fill="currentColor"/><circle cx="3.2" cy="2.8" r=".8" fill="currentColor"/>';
+  setSvg(svg, '<path d="M8 1.5l1.3 4.2L13.5 7 9.3 8.3 8 12.5 6.7 8.3 2.5 7l4.2-1.3z" fill="currentColor"/><circle cx="13" cy="12.5" r="1.1" fill="currentColor"/><circle cx="3.2" cy="2.8" r=".8" fill="currentColor"/>');
   return svg;
 }
 
@@ -393,7 +415,8 @@ export function drawStone(grave: HTMLElement, t: Traits): void {
         : '';
 
   slab.setAttribute('viewBox', `0 0 ${w} ${h}`);
-  slab.innerHTML =
+  setSvg(
+    slab,
     `<defs><clipPath id="${id}"><path d="${d}"/></clipPath></defs>` +
     `<path d="${d}" fill="url(#mat-${t.material})"/>` +
     `<g clip-path="url(#${id})">` +
@@ -416,7 +439,8 @@ export function drawStone(grave: HTMLElement, t: Traits): void {
     `<path d="${d}" fill="none" stroke="#000" stroke-opacity=".16" stroke-width="12"/>` +
     `<path d="${d}" fill="none" stroke="#000" stroke-opacity=".3" stroke-width="4"/>` +
     `<path d="${d}" fill="none" stroke="#eef2ff" stroke-opacity=".45" stroke-width="2.2" transform="translate(-1.2 1.4)"/>` +
-    `</g>`;
+    `</g>`,
+  );
   const glow = grave.querySelector<HTMLElement>('.lights');
   if (glow) glow.style.clipPath = `path('${d}')`;
 
@@ -456,11 +480,13 @@ function drawMound(svg: SVGSVGElement, t: Traits, faceW: number): void {
     const rr = between(r, 1.2, 2.8);
     pebbles += `M${n1(x - rr)},${n1(y)}a${n1(rr)},${n1(rr * 0.7)} 0 1 0 ${n1(rr * 2)},0a${n1(rr)},${n1(rr * 0.7)} 0 1 0 ${n1(-rr * 2)},0`;
   }
-  svg.innerHTML =
+  setSvg(
+    svg,
     `<ellipse cx="${n1(cx)}" cy="${H - 8}" rx="${n1(W * 0.62)}" ry="20" fill="url(#turf)"/>` +
     `<ellipse class="warmth" cx="${n1(cx)}" cy="${n1(crest + 10)}" rx="${n1(W * 0.42)}" ry="16" fill="url(#candleground)"/>` +
     `<path d="${hump}" fill="url(#earth)"/>` +
     `<ellipse cx="${n1(cx - faceW * 0.12)}" cy="${n1(crest + 6)}" rx="${n1(faceW * 0.5)}" ry="6" fill="#000" opacity=".35"/>` +
     `<path d="${pebbles}" fill="#4a4038" opacity=".8"/>` +
-    `<path d="${fills[0]}" fill="#1f2b18"/><path d="${fills[1]}" fill="#2a3a20"/><path d="${fills[2]}" fill="#3d5230"/>`;
+    `<path d="${fills[0]}" fill="#1f2b18"/><path d="${fills[1]}" fill="#2a3a20"/><path d="${fills[2]}" fill="#3d5230"/>`,
+  );
 }

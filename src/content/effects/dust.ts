@@ -124,8 +124,26 @@ function backgroundAt(x: number, y: number, read: (css: string) => Uint8ClampedA
   return null;
 }
 
-/** Is the page mostly dark? Sampled once at start, before our overlay exists. */
+/**
+ * A root filtered with invert() (Dark Reader's filter mode, "night mode" sites) shows the
+ * opposite of its colours. Our host is lifted out of that filter, so judge what is on screen.
+ */
+function rootInverted(): boolean {
+  try {
+    const m = /invert\(\s*([\d.]+)(%?)\s*\)/.exec(getComputedStyle(document.documentElement).filter);
+    return !!m && Number(m[1]) / (m[2] ? 100 : 1) > 0.5;
+  } catch {
+    return false;
+  }
+}
+
+/** Is the page, as it shows on screen, mostly dark? */
 function pageIsDark(): boolean {
+  return pageIsDarkRaw() !== rootInverted();
+}
+
+/** Is the page mostly dark, by its own background colours? Our layers never take hits, so they are not sampled. */
+function pageIsDarkRaw(): boolean {
   const read = makeColorReader();
   let dark = 0;
   let seen = 0;
@@ -189,6 +207,7 @@ export class Dust implements Effect {
   private scratchSprite: HTMLCanvasElement | null = null;
 
   private rng: () => number = Math.random;
+  private seed = 0;
   private stage = 1;
   private reduced = false;
   private dark = false;
@@ -255,6 +274,9 @@ export class Dust implements Effect {
   private mix = 1;
   private company = false;
   private hostObserver: MutationObserver | null = null;
+  private themeObserver: MutationObserver | null = null;
+  private scheme: MediaQueryList | null = null;
+  private themeTimer: number | undefined;
   private lastScrollAt = -Infinity;
   private restTimer: number | undefined;
 
@@ -283,6 +305,8 @@ export class Dust implements Effect {
   private readonly artShape = new Float32Array(8);
 
   private raf = 0;
+  /** Inside a frame: a wake from within (scroll read, wear) must not start a second loop. */
+  private inFrame = false;
   private lastDraw = 0;
   private last = 0;
   private stopTimer: number | undefined;
@@ -319,6 +343,7 @@ export class Dust implements Effect {
     }
     if (Array.from(document.querySelectorAll('video')).some(isBigPlayingVideo)) return;
     this.stage = stage;
+    this.seed = ctx.seed;
     this.rng = seeded(ctx.seed ^ 0x5eed_d057);
     this.dark = pageIsDark();
     this.level = 1;
@@ -361,10 +386,17 @@ export class Dust implements Effect {
     clearTimeout(this.resizeTimer);
     clearInterval(this.creepTimer);
     clearTimeout(this.restTimer);
-    this.stopTimer = this.hiddenTimer = this.resizeTimer = this.creepTimer = this.restTimer = undefined;
+    clearTimeout(this.themeTimer);
+    this.stopTimer = this.hiddenTimer = this.resizeTimer = this.creepTimer = this.restTimer = this.themeTimer = undefined;
     if (this.raf) cancelAnimationFrame(this.raf);
     this.raf = 0;
     this.listen(false);
+    this.teardown();
+    this.fvx = this.fvy = this.tvx = this.tvy = new Float32Array(0);
+  }
+
+  /** Remove the overlay and everything drawn in it (the state of the haunting stays). */
+  private teardown(): void {
     this.hostObserver?.disconnect();
     this.hostObserver = null;
     // Let go of the bitmaps right away rather than waiting for the collector.
@@ -378,10 +410,36 @@ export class Dust implements Effect {
     this.grain = this.grainTile = this.scratchSprite = this.glintSprite = null;
     this.sprites = [];
     this.motes = [];
-    this.fvx = this.fvy = this.tvx = this.tvy = new Float32Array(0);
     this.opacity.clear();
+    this.blendHidden = this.flatHidden = false;
+    this.vigScale = 0;
     this.art = 0;
   }
+
+  /**
+   * The page switched between light and dark: the look is built for one or the other (multiply
+   * paper on light pages, a light veil on dark ones), so build it again for the new background,
+   * keeping how worn the haunting is. The same seed puts the shaft of light in the same place.
+   */
+  private onTheme = (): void => {
+    // At most a few checks a second, however busily the page rewrites its classes.
+    if (this.themeTimer !== undefined || !this.overlay) return;
+    this.themeTimer = window.setTimeout(() => {
+      this.themeTimer = undefined;
+      if (!this.overlay || this.stopping || this.dissolving) return;
+      // A root that gains a transform or filter gets our host lifted into the top layer.
+      this.onHosts();
+      const dark = pageIsDark();
+      if (dark === this.dark) return;
+      this.dark = dark;
+      this.teardown();
+      this.rng = seeded(this.seed ^ 0x5eed_d057);
+      this.build();
+      this.paintLayers(smooth(this.intro) * smooth(this.fade) * Math.pow(this.shown, 0.85));
+      this.kickUp(STIR_LINGER_MS);
+      this.wake();
+    }, 300);
+  };
 
   // --- building --------------------------------------------------------------
 
@@ -644,9 +702,36 @@ export class Dust implements Effect {
     const d = on ? document.addEventListener.bind(document) : document.removeEventListener.bind(document);
     d('visibilitychange', this.onVisibility, opts);
     d('play', this.onPlay, opts);
+    if (on) {
+      this.themeObserver = new MutationObserver(this.onTheme);
+      const themeOpts = { attributes: true, attributeFilter: ['class', 'style', 'data-theme', 'data-color-mode', 'data-bs-theme'] };
+      this.themeObserver.observe(document.documentElement, themeOpts);
+      if (document.body) this.themeObserver.observe(document.body, themeOpts);
+      this.scheme = matchMedia('(prefers-color-scheme: dark)');
+      this.scheme.addEventListener('change', this.onTheme);
+    } else {
+      this.themeObserver?.disconnect();
+      this.themeObserver = null;
+      this.scheme?.removeEventListener('change', this.onTheme);
+      this.scheme = null;
+    }
+  }
+
+  /**
+   * On a page that transforms or filters <html> our host is lifted into the top layer (see
+   * attachHost). That is an isolated blend group: the blend layers would mix with nothing and
+   * paint solid beige over the whole page. There only the plain look is safe.
+   */
+  private lifted(): boolean {
+    try {
+      return !!this.overlay?.host.matches(':popover-open');
+    } catch {
+      return false;
+    }
   }
 
   private hasCompany(): boolean {
+    if (this.lifted()) return true;
     const own = this.overlay?.host;
     for (const el of Array.from(document.documentElement.children)) {
       if (el !== own && el.tagName === 'DIV' && el.hasAttribute(OUR_ATTR)) return true;
@@ -656,6 +741,11 @@ export class Dust implements Effect {
 
   private onHosts = (): void => {
     const company = this.hasCompany();
+    // Lifted into the top layer: no crossfade, the blend layers must not show for a single frame.
+    if (company && this.lifted() && this.mix > 0) {
+      this.mix = 0;
+      this.paintLayers(smooth(this.intro) * smooth(this.fade) * Math.pow(this.shown, 0.85));
+    }
     if (company === this.company) return;
     this.company = company;
     this.wake();
@@ -778,7 +868,7 @@ export class Dust implements Effect {
   // --- animation -------------------------------------------------------------
 
   private wake(): void {
-    if (!this.overlay || this.raf || document.visibilityState === 'hidden') return;
+    if (!this.overlay || this.raf || this.inFrame || document.visibilityState === 'hidden') return;
     if (this.asleep) {
       this.asleep = false;
       clearInterval(this.creepTimer);
@@ -813,6 +903,15 @@ export class Dust implements Effect {
 
   private frame = (now: number): void => {
     this.raf = 0;
+    this.inFrame = true;
+    try {
+      this.step(now);
+    } finally {
+      this.inFrame = false;
+    }
+  };
+
+  private step(now: number): void {
     if (!this.overlay) return;
     // Film rate: 24fps is plenty for dust, even swirling.
     if (now - this.lastDraw < 1000 / 24 - 4) {
@@ -898,7 +997,7 @@ export class Dust implements Effect {
       return;
     }
     this.raf = requestAnimationFrame(this.frame);
-  };
+  }
 
   /** Scroll since the last frame, read here rather than in the scroll handler. */
   private readScroll(): void {

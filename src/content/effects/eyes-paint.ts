@@ -241,48 +241,71 @@ export function paintSclera(w: number, scale: number, rand: () => number, stage:
 }
 
 /**
- * The core of the darkness: a soft-shouldered disc (stretched to an oval when
- * drawn) whose alpha carries faint, fine noise, so it reads as dimness in the
- * air rather than an airbrushed blot. The very centre stays solid.
+ * The core of the darkness, painted at the size it is drawn (w by h px) so its
+ * noise is round, not smeared into streaks. A deep centre that thins through a
+ * long, smoky falloff; the edge is pushed in and out by several octaves of
+ * noise, more the further out it is, so it reads as shadow pooling in the air
+ * rather than ink or an airbrushed ellipse.
  */
-export function paintPoolCore(size: number, color: RGB, rand: () => number): HTMLCanvasElement {
-  const [c, g] = surface(size, size);
-  const img = g.createImageData(size, size);
-  // Two octaves of smooth value noise.
-  const N = 7;
-  const grid = new Float32Array((N + 1) * (N + 1));
-  const fine = new Float32Array((N * 3 + 1) * (N * 3 + 1));
-  for (let i = 0; i < grid.length; i++) grid[i] = rand();
-  for (let i = 0; i < fine.length; i++) fine[i] = rand();
-  const sample = (arr: Float32Array, n: number, u: number, v: number) => {
-    const x = u * n;
-    const y = v * n;
-    const x0 = Math.min(n - 1, Math.floor(x));
-    const y0 = Math.min(n - 1, Math.floor(y));
-    const fx = x - x0;
-    const fy = y - y0;
-    const sx = fx * fx * (3 - 2 * fx);
-    const sy = fy * fy * (3 - 2 * fy);
-    const W = n + 1;
-    const a = arr[y0 * W + x0] + (arr[y0 * W + x0 + 1] - arr[y0 * W + x0]) * sx;
-    const b = arr[(y0 + 1) * W + x0] + (arr[(y0 + 1) * W + x0 + 1] - arr[(y0 + 1) * W + x0]) * sx;
-    return a + (b - a) * sy;
+export function paintPoolCore(w: number, h: number, color: RGB, rand: () => number): HTMLCanvasElement {
+  const W = Math.max(8, Math.ceil(w));
+  const Hh = Math.max(4, Math.ceil(h));
+  const [c, g] = surface(W, Hh);
+  const img = g.createImageData(W, Hh);
+  // Value-noise octaves on square cells, a few across the short side.
+  const octave = (cell: number) => {
+    const nx = Math.ceil(W / cell) + 2;
+    const ny = Math.ceil(Hh / cell) + 2;
+    const lat = new Float32Array(nx * ny);
+    for (let i = 0; i < lat.length; i++) lat[i] = rand();
+    const ox = rand() * cell;
+    const oy = rand() * cell;
+    return (x: number, y: number) => {
+      const fx = (x + ox) / cell;
+      const fy = (y + oy) / cell;
+      const x0 = Math.floor(fx);
+      const y0 = Math.floor(fy);
+      const tx = fx - x0;
+      const ty = fy - y0;
+      const sx = tx * tx * (3 - 2 * tx);
+      const sy = ty * ty * (3 - 2 * ty);
+      const k = y0 * nx + x0;
+      const a = lat[k] + (lat[k + 1] - lat[k]) * sx;
+      const b = lat[k + nx] + (lat[k + nx + 1] - lat[k + nx]) * sx;
+      return a + (b - a) * sy;
+    };
   };
-  const half = size / 2;
-  for (let y = 0; y < size; y++) {
-    for (let x = 0; x < size; x++) {
-      const dx = (x + 0.5 - half) / half;
-      const dy = (y + 0.5 - half) / half;
+  const o1 = octave(Hh * 0.55);
+  const o2 = octave(Hh * 0.27);
+  const o3 = octave(Hh * 0.13);
+  const o4 = octave(Math.max(2, Hh * 0.06));
+  const sstep = (e0: number, e1: number, v: number) => {
+    const t = Math.min(1, Math.max(0, (v - e0) / (e1 - e0)));
+    return t * t * (3 - 2 * t);
+  };
+  const cx = W / 2;
+  const cy = Hh / 2;
+  for (let y = 0; y < Hh; y++) {
+    for (let x = 0; x < W; x++) {
+      const dx = (x + 0.5 - cx) / cx;
+      const dy = (y + 0.5 - cy) / cy;
       const r = Math.sqrt(dx * dx + dy * dy);
       if (r >= 1) continue;
-      const coarse = sample(grid, N, x / size, y / size);
-      const n = coarse * 0.6 + sample(fine, N * 3, x / size, y / size) * 0.4;
-      // Slow noise pushes the edge in and out, so the silhouette is never a clean ellipse.
-      const re = r * (1 + (coarse - 0.5) * 0.28 * r);
-      const t = Math.min(1, Math.max(0, (re - 0.42) / 0.58));
-      let a = Math.pow(1 - t * t * (3 - 2 * t), 1.15);
-      a *= 1 + (n - 0.5) * 0.16 * Math.min(1, r * 1.6);
-      const o = (y * size + x) * 4;
+      // Smoke: broad slow lobes push the edge in and out (more the further out),
+      // finer curls only shade it. Mostly eaten inward, so the sprite's own edge
+      // is never reached and never shows as a cut.
+      const lobes = o1(x, y) * 0.65 + o2(x, y) * 0.35;
+      const curls = o3(x, y) * 0.6 + o4(x, y) * 0.4;
+      const edge = sstep(0.3, 1, r);
+      const re = r * (1 + (lobes - 0.42) * 0.85 * edge);
+      // A deep heart behind the eyes, wrapped in a broader smoky falloff.
+      const heart = 1 - sstep(0.42, 0.8, re);
+      const haze = 0.82 * Math.exp(-3 * re * re);
+      let a = 1 - (1 - heart) * (1 - haze);
+      a *= 1 - sstep(0.84, 1, r);
+      // Faint, soft mottling toward the rim; the centre stays solid.
+      a *= 1 - 0.45 * (curls - 0.3) * sstep(0.4, 0.95, re);
+      const o = (y * W + x) * 4;
       img.data[o] = color[0];
       img.data[o + 1] = color[1];
       img.data[o + 2] = color[2];

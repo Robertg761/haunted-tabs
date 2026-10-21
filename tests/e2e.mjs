@@ -25,6 +25,7 @@ const pages = {
   '/alpha': `<title>Alpha page</title><link rel="icon" href="/fav.svg"><h1 style="font:48px sans-serif">Alpha: a perfectly normal page</h1><p>Lorem ipsum dolor sit amet.</p>`,
   '/form': `<title>Form page</title><link rel="icon" href="/fav.svg"><form><input id="name"><textarea></textarea></form>`,
   '/plain': `<title>Plain page</title><p>No favicon here.</p>`,
+  '/editor': `<title>Editor page</title><div contenteditable="true"><p>A draft the page loaded or someone typed</p></div>`,
   '/ticker': `<title>Ticker 0</title><link rel="icon" href="/fav.svg"><script>let n=0;setInterval(()=>{document.title='Ticker '+(++n)},300)</script>`,
 };
 const server = createServer((req, res) => {
@@ -135,6 +136,9 @@ try {
   const formId = await sw.evaluate(async (url) => (await chrome.tabs.query({ url }))[0].id, `${origin}/form`);
   const refused = await ask({ type: 'discard', tabId: formId });
   check(refused.ok === false, 'tab with unsaved input refuses to be discarded');
+  const kept = await ask({ type: 'bury', tabId: formId });
+  const stillOpen = await sw.evaluate(async (id) => !!(await chrome.tabs.get(id).catch(() => null)), formId);
+  check(kept.ok === false && stillOpen, 'closing a tab with unsaved input from the popup is refused');
 
   // A page that keeps rewriting its own title stays haunted.
   await sleep(1000);
@@ -283,6 +287,78 @@ try {
   );
   const badge = await sw.evaluate(() => chrome.action.getBadgeText({}));
   check(badge === '', 'badge cleared');
+
+  // Chrome reports pushState and #hash changes as page loads. A dead tab that
+  // updates its own URL right after possessing you must not possess you twice.
+  await ask({ type: 'setSettings', settings: { enabled: true } });
+  await advance(130 * MIN);
+  await ask({ type: 'setSettings', settings: {} });
+  const plainPage = context.pages().find((p) => p.url() === `${origin}/plain`);
+  check(/^(💀|⚰️)/.test((await plainPage?.title()) ?? ''), `a resurrected tab can die again: "${await plainPage?.title()}"`);
+  const glitchShown = () => plainPage.evaluate(() => !!document.querySelector('[data-haunted-tabs="glitch"]'));
+  await plainPage.bringToFront();
+  check(await eventually(glitchShown, 2000), 'it possesses the screen when you return');
+  // The tab strip still shows the tombstone while the possession plays. It is not the page's name.
+  const midPossession = (await ask({ type: 'snapshot' })).tabs.find((t) => t.url === `${origin}/plain`);
+  check(midPossession?.title === 'Plain page', `the popup shows the real title mid-possession ("${midPossession?.title}")`);
+  check(await eventually(async () => !(await glitchShown()) && (await plainPage.title()) === 'Plain page', 4000), 'and lets go');
+  const plainWebs = () => plainPage.evaluate(() => Number(document.querySelector('[data-haunted-tabs="cobwebs"]')?.dataset.webs ?? 0));
+  const websAfterVisit = await eventually(plainWebs, 2000);
+  await plainPage.evaluate(() => history.replaceState({ view: 1 }, '', location.href));
+  await plainPage.evaluate(() => history.pushState({}, '', '/plain?view=2'));
+  await plainPage.evaluate(() => (location.hash = 'section'));
+  check(!(await eventually(glitchShown, 2500)), 'a replaceState, pushState or #hash change straight after does not possess it again');
+  check((await plainWebs()) <= websAfterVisit, `nor lay a second set of webs (${websAfterVisit} → ${await plainWebs()})`);
+  check((await plainPage.title()) === 'Plain page', 'the page keeps its real title');
+  const later = (await ask({ type: 'snapshot' })).tabs.find((t) => t.url.startsWith(`${origin}/plain`));
+  check(later?.title === 'Plain page', `and the popup remembers it ("${later?.title}")`);
+  await ask({ type: 'exorcise' });
+
+  // The Graveyard removes graves through the worker, in the same queue as burials.
+  const gravesNow = async () => (await sw.evaluate(async () => (await chrome.storage.local.get('graveyard')).graveyard)) ?? [];
+  const before = await gravesNow();
+  const plainTabId = await sw.evaluate(async (url) => (await chrome.tabs.query({})).find((t) => t.url.startsWith(url))?.id, `${origin}/plain`);
+  const [removeRes] = await Promise.all([
+    ask({ type: 'removeGraves', ids: before.map((g) => g.id) }),
+    ask({ type: 'bury', tabId: plainTabId }),
+  ]);
+  const afterGraves = await gravesNow();
+  check(removeRes?.ok === true, 'removeGraves answers ok');
+  check(
+    afterGraves.length === 1 && afterGraves[0].url.startsWith(`${origin}/plain`) && !afterGraves.some((g) => before.some((b) => b.id === g.id)),
+    `removing graves never loses a burial made at the same moment (${afterGraves.length} left)`,
+  );
+
+  // Closing from the popup skips the leave-page prompt. A page that cannot be
+  // checked for unsaved input (here: too busy to answer) must not be closed.
+  const busyPage = await context.newPage();
+  await busyPage.goto(`${origin}/form#busy`);
+  await busyPage.fill('#name', 'unsaved thoughts');
+  const busyId = await sw.evaluate(async (url) => (await chrome.tabs.query({})).find((t) => t.url === url).id, `${origin}/form#busy`);
+  await control.bringToFront();
+  await sw.evaluate((id) => {
+    chrome.scripting.executeScript({ target: { tabId: id }, world: 'MAIN', func: () => { const end = Date.now() + 5000; while (Date.now() < end); } });
+  }, busyId);
+  await sleep(300);
+  const busyBury = await ask({ type: 'bury', tabId: busyId });
+  check(busyBury.ok === false && /isn't responding/.test(busyBury.reason ?? ''), `a tab that cannot be checked is not closed (${busyBury.reason})`);
+  const insisted = await ask({ type: 'bury', tabId: busyId, force: true });
+  check(insisted.ok === false, 'and burying it again does not force a busy page closed');
+  await sleep(5000);
+  check((await busyPage.inputValue('#name')) === 'unsaved thoughts', 'and its input is still there');
+  await busyPage.close();
+
+  // An editor holding text we never saw typed is a doubt the user may settle by burying again.
+  const editorPage = await context.newPage();
+  await editorPage.goto(`${origin}/editor`);
+  const editorId = await sw.evaluate(async (url) => (await chrome.tabs.query({})).find((t) => t.url === url).id, `${origin}/editor`);
+  await control.bringToFront();
+  const doubt = await ask({ type: 'bury', tabId: editorId });
+  check(doubt.ok === false && doubt.unchecked === true && /editor/.test(doubt.reason ?? ''), `an editor with text is not closed at first (${doubt.reason})`);
+  const settled = await ask({ type: 'bury', tabId: editorId, force: true });
+  const editorGone = await sw.evaluate(async (id) => !(await chrome.tabs.get(id).catch(() => null)), editorId);
+  check(settled.ok === true && editorGone, 'burying it again closes it');
+
 } catch (err) {
   console.error(err);
   failures++;

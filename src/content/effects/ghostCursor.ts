@@ -277,6 +277,7 @@ export class GhostCursor implements Effect {
   private rR = 0;
   private rB = 0;
   private rectDirty = false;
+  private rectAt = 0;
   private tx = 0; // hover point, viewport coordinates
   private ty = 0;
   private ringAt = -1e9;
@@ -304,6 +305,10 @@ export class GhostCursor implements Effect {
 
   start(ctx: EffectContext): void {
     if (this.overlay && this.phase !== 'fading') return;
+    if (this.overlay && !document.hidden && this.alpha > 0.01) {
+      this.revive();
+      return;
+    }
     if (this.overlay) this.destroy();
 
     this.reduced = ctx.reduced;
@@ -399,6 +404,11 @@ export class GhostCursor implements Effect {
     this.vw = innerWidth;
     this.vh = innerHeight;
     this.dpr = Math.min(2, devicePixelRatio || 1);
+    // A resize reflows the page: the target has probably moved.
+    if (this.phase === 'script' && this.target) {
+      this.rectDirty = true;
+      this.wake();
+    }
   };
 
   private listen(on: boolean): void {
@@ -509,6 +519,29 @@ export class GhostCursor implements Effect {
     this.x = this.dx;
     this.y = this.dy;
     this.vx = this.vy = 0;
+    this.phase = 'follow';
+    this.wake();
+  }
+
+  /**
+   * Asked back while fading out: it fades in again from where it had got to and
+   * goes back to shadowing you, instead of vanishing and reappearing.
+   */
+  private revive(): void {
+    clearTimeout(this.killTimer);
+    this.killTimer = undefined;
+    const t = this.now();
+    const a = clamp01(this.alpha);
+    // Inverse of the fade-in's smoothstep, so the opacity carries on from here.
+    this.spawnAt = t - (this.reduced ? 1400 : 900) * (0.5 - Math.sin(Math.asin(1 - 2 * a) / 3));
+    this.autonomyAt = t + 3000 + this.rnd() * 1000;
+    this.steps = [];
+    this.target = null;
+    this.ringAt = this.pressAt = -1e9;
+    this.pointing = this.reading = false;
+    this.ghost?.classList.remove('pointing', 'reading');
+    this.copying = false;
+    this.startWander(t, 300);
     this.phase = 'follow';
     this.wake();
   }
@@ -792,9 +825,13 @@ export class GhostCursor implements Effect {
   };
 
   private scripted(t: number, dt: number): void {
+    // While it moves, a glance every quarter second at where the target is now:
+    // pages shift under the pointer (late images, banners), and it should follow.
+    if (this.target && t - this.rectAt > 250) this.rectDirty = true;
     if (this.rectDirty) {
-      // Scrolled (the window or any box): one fresh read of where the target is now.
+      // Scrolled (the window or any box), or time for another look: one fresh read of where the target is now.
       this.rectDirty = false;
+      this.rectAt = t;
       if (this.target?.isConnected) this.setRect(this.target.getBoundingClientRect());
       const last = this.steps.length - 1;
       if (this.stepIndex < last && (!this.target?.isConnected || this.tx < 4 || this.ty < 4 || this.tx > this.vw - 4 || this.ty > this.vh - 4)) {
@@ -818,6 +855,8 @@ export class GhostCursor implements Effect {
       this.stepY0 = this.dy;
       this.stepIndex++;
       this.stepFired = false;
+      // The page may have shifted under it (late images, a banner): look again before the next move.
+      if (this.target) this.rectDirty = true;
       step = this.steps[this.stepIndex];
     }
     if (!step) return this.destroy();

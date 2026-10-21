@@ -194,6 +194,44 @@ try {
   check(await eventually(async () => (await popup.locator(`[data-id="${towerId}"]`).count()) === 0), 'Delete buries the focused row');
   check(await eventually(async () => (await active()).action === 'switch'), 'focus lands on a neighbouring row');
 
+  // Backspace in the list is someone fixing their search: it buries nothing.
+  const gravesBefore = (await sw.evaluate(async () => (await chrome.storage.local.get('graveyard')).graveyard ?? [])).length;
+  await popup.fill('#search', 'lanter');
+  await eventually(async () => (await liveRows().count()) === 1);
+  await popup.keyboard.press('ArrowDown');
+  await popup.keyboard.press('Backspace');
+  check((await active()).id === 'search' && (await popup.inputValue('#search')) === 'lante', 'Backspace in the list goes back to the search and edits it');
+  await popup.keyboard.press('ArrowDown');
+  await popup.keyboard.type('r');
+  check((await popup.inputValue('#search')) === 'lanter', 'typing in the list types into the search');
+  await popup.fill('#search', '');
+  await sleep(200);
+  const gravesAfter = (await sw.evaluate(async () => (await chrome.storage.local.get('graveyard')).graveyard ?? [])).length;
+  check(gravesAfter === gravesBefore, 'and nothing was buried');
+
+  // A double Delete buries once, without an error.
+  const storiesId = await tabId('/stories');
+  await popup.focus(`[data-id="${storiesId}"] .open`);
+  await popup.evaluate(() => {
+    for (let i = 0; i < 2; i++) document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', bubbles: true }));
+  });
+  check(await eventually(async () => (await popup.locator(`[data-id="${storiesId}"]`).count()) === 0), 'a double Delete buries the row');
+  await sleep(500);
+  const buried = (await sw.evaluate(async () => (await chrome.storage.local.get('graveyard')).graveyard ?? [])).length;
+  check(buried === gravesAfter + 1, `exactly once (${buried - gravesAfter})`);
+  check(await popup.isHidden('#notice'), 'and no error is shown');
+
+  // A row whose tab closed elsewhere since the last refresh.
+  const lanternId = await tabId('/lantern');
+  await sw.evaluate((id) => chrome.tabs.remove(id), lanternId);
+  await popup.evaluate((id) => document.querySelector(`[data-id="${id}"] .open`)?.click(), lanternId);
+  await sleep(400);
+  const gone = (await popup.isVisible('#notice')) ? await popup.textContent('#notice') : '';
+  check(!/refused|error/i.test(gone), `a tab closed meanwhile gets a gentle answer${gone ? ` ("${gone}")` : ''}`);
+
+  // Reopening lays the popup out as it was before the first answer arrives.
+  check(await popup.evaluate(() => JSON.parse(localStorage.getItem('boot') ?? 'null')?.[0] === 1), 'the popup remembers it was haunting');
+
   // Exorcise.
   await popup.focus('#exorcise');
   await popup.keyboard.press('Enter');

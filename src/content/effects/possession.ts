@@ -17,7 +17,7 @@
 // darken and lift, the apparition surfacing once. Nothing strobes. With reduced
 // motion it is only a slow darkening with the message fading in and out.
 
-import { HOST_CSS, Z, createHost, seeded } from './overlay';
+import { HOST_CSS, Z, attachHost, createHost, seeded } from './overlay';
 import { APPARITION_CHIN, channelMatrix, drawApparition, drawGrain, drawSnow, moshFilter, shearFilter, splitFilter, svgEl } from './possession-art';
 
 const BANDS = 6;
@@ -40,6 +40,8 @@ const MOSH_BURSTS: [number, number][] = [
 const HOLD_START = 0.28;
 const HOLD_END = 0.78;
 const RELEASE = 0.8;
+/** By here the page is nearly lit again; torn colour over it would read as a fault, so the slices are gone. */
+const LIFTED = 0.9;
 const SETTLED = 0.975;
 const REVEAL_START = 0.06;
 const REVEAL_SPREAD = 0.16;
@@ -63,7 +65,7 @@ ${HOST_CSS}
 .ghost { position: absolute; left: 50%; top: 0; opacity: 0; transform: translateX(-50%); }
 .ghost canvas { display: block; width: 100%; height: 100%; }
 .stage { position: absolute; inset: 0; display: grid; place-items: center; padding: 0 6vw; }
-.msg { position: relative; max-width: min(100%, 1180px); text-align: center; color: #f2ece2; opacity: 0;
+.msg { position: relative; max-width: min(100%, 1180px); text-align: center; text-wrap: balance; color: #f2ece2; opacity: 0;
   font-family: "Didot", "Bodoni 72", "Bodoni MT", "Playfair Display", "Cormorant Garamond", Georgia, "Times New Roman", "Liberation Serif", serif;
   font-weight: 500; line-height: 1.12; font-size: 64px; text-rendering: geometricPrecision; -webkit-font-smoothing: antialiased; }
 .msg::before { content: ""; position: absolute; inset: -45% -14%; z-index: -1;
@@ -377,7 +379,7 @@ function buildGlitch(host: HTMLElement, wrap: HTMLDivElement, root: ShadowRoot, 
   const dim = div('fill dim tint', wrap);
   if (svg) dim.style.display = 'none';
   const { msg, units, words } = buildMessage(wrap, message, rand);
-  document.documentElement.appendChild(host);
+  attachHost(host, Z.possession);
   fitMessage(msg, words, units.length);
   const box = msg.getBoundingClientRect();
   const pad = Math.max(12, vh * 0.03);
@@ -641,7 +643,7 @@ function buildGlitch(host: HTMLElement, wrap: HTMLDivElement, root: ShadowRoot, 
       const x = still ? 0 : band.spring.x;
       // Fast-moving slices smear their colours apart: motion you can see the weight of.
       const fringe = (1.5 + Math.min(6, Math.abs(band.spring.v) * 0.005)) * scale;
-      const visible = !still && Math.abs(x) > 0.5;
+      const visible = u < LIFTED && Math.abs(x) > 0.5;
       if (visible !== band.shown) {
         band.el.style.visibility = visible ? 'visible' : 'hidden';
         band.shown = visible;
@@ -662,7 +664,7 @@ function buildGlitch(host: HTMLElement, wrap: HTMLDivElement, root: ShadowRoot, 
     if (mt !== moshTick) {
       moshTick = mt;
       for (const { el, f } of blocks) {
-        if (!burst || still || rand() < 0.3) {
+        if (!burst || u >= LIFTED || rand() < 0.3) {
           el.style.visibility = 'hidden';
           continue;
         }
@@ -777,7 +779,7 @@ function calm(message: string, duration: number, seed: number): Scene {
     const vignette = div('fill vignette', wrap);
     const { msg, units, words } = buildMessage(wrap, message, rand);
     for (const g of units) g.el.classList.remove('h');
-    document.documentElement.appendChild(host);
+    attachHost(host, Z.possession);
     fitMessage(msg, words, units.length);
     const ghost = placeGhost(wrap, rand, msg.getBoundingClientRect().top);
     wrap.insertBefore(ghost, msg.parentElement);
