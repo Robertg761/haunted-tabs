@@ -142,6 +142,8 @@ export type PopupRequest =
   | { type: 'bury'; tabId: number }
   | { type: 'discard'; tabId: number }
   | { type: 'switch'; tabId: number }
+  /** Remove graves (resurrected or laid to rest), in the same queue as burials so none is lost. */
+  | { type: 'removeGraves'; ids: string[] }
   /** Sent while a permission prompt is open: apply these settings once it is granted. */
   | { type: 'armPermission'; settings: Partial<Settings> };
 

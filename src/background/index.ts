@@ -288,7 +288,7 @@ async function paint(tab: chrome.tabs.Tab, rec: TabRecord, stage: Stage, now: nu
 function paintedTitle(tab: chrome.tabs.Tab, rec: TabRecord, stage: Stage, now: number): string {
   return hauntedTitle({
     stage,
-    realTitle: rec.realTitle ?? tab.title ?? '',
+    realTitle: rec.realTitle ?? (tab.title !== rec.lastPaint ? tab.title : undefined) ?? '',
     url: tab.url ?? '',
     idleMs: now - rec.lastSeen,
     thresholdMinutes: settings.thresholdMinutes,
@@ -304,13 +304,14 @@ async function isSafeToClose(tab: chrome.tabs.Tab, rec: TabRecord): Promise<bool
   return res?.ok === true && res.dirty === false;
 }
 
+/**
+ * Every Graveyard write is a load-modify-save. They all run in one queue (and
+ * from inside locked()), so a burial never overwrites a resurrection or the
+ * other way round.
+ */
 let graveQueue: Promise<unknown> = Promise.resolve();
-function addGrave(grave: Grave): Promise<void> {
-  const run = graveQueue.then(async () => {
-    const graves = await loadGraves();
-    graves.unshift(grave);
-    await saveGraves(graves);
-  });
+function editGraves(edit: (graves: Grave[]) => Grave[]): Promise<void> {
+  const run = graveQueue.then(async () => saveGraves(edit(await loadGraves())));
   graveQueue = run.catch(() => {});
   return run;
 }
@@ -327,7 +328,7 @@ async function bury(tab: chrome.tabs.Tab, rec: TabRecord, cause: Grave['cause'],
     await restoreTab(tab.id!, rec);
     await new Promise((r) => setTimeout(r, 400));
   }
-  await addGrave({
+  const grave: Grave = {
     id: crypto.randomUUID(),
     url,
     title,
@@ -335,7 +336,8 @@ async function bury(tab: chrome.tabs.Tab, rec: TabRecord, cause: Grave['cause'],
     diedAt: now,
     idleMs: now - rec.lastSeen,
     cause,
-  });
+  };
+  await editGraves((graves) => [grave, ...graves]);
   await ext.tabs.remove(tab.id!);
   delete state.records[tab.id!];
 }
@@ -597,7 +599,8 @@ async function returnVisit(tab: chrome.tabs.Tab, rec: TabRecord, stage: Stage, i
       rec.lastPaint = title;
       await send(tabId, { type: 'haunt:apply', title, icon: await iconFor(stage as Exclude<Stage, Stage.Alive>, tab.url ?? '', rec.realFavIconUrl) }, true);
     }
-    const message = possessionMessage(idle, rec.seed);
+    // A different line each visit, but the same one if a reload replays this visit.
+    const message = possessionMessage(idle, rec.seed + Math.floor(idle / 60_000));
     const res = await send<{ ok: boolean }>(tabId, { type: 'haunt:glitch', message, thenRestore: true, durationMs: glitchMs(message) }, false);
     delivered = !!res?.ok;
   } else {
@@ -779,6 +782,11 @@ async function handle(req: PopupRequest): Promise<unknown> {
       await persist();
       return { ok: true };
     }
+    case 'removeGraves': {
+      const ids = new Set(Array.isArray(req.ids) ? req.ids : []);
+      await editGraves((graves) => graves.filter((g) => !ids.has(g.id)));
+      return { ok: true };
+    }
     case 'discard': {
       const tab = await ext.tabs.get(req.tabId);
       const rec = recordFor(tab, Date.now());
@@ -837,11 +845,18 @@ ext.alarms.onAlarm.addListener((alarm) => {
     await tick();
     // Alarms fire at most every 30s. Short demo thresholds get extra ticks while the worker is awake.
     if (settings.thresholdMinutes <= 2) {
-      setTimeout(() => locked(tick), 10_000);
-      setTimeout(() => locked(tick), 20_000);
+      setTimeout(() => locked(extraTick), 10_000);
+      setTimeout(() => locked(extraTick), 20_000);
     }
   });
 });
+
+async function extraTick(): Promise<void> {
+  // An overdue alarm means the computer just woke up. Let the alarm tick first, so the sleep is skipped.
+  const next = await ext.alarms.get(TICK_ALARM);
+  if (next && next.scheduledTime < Date.now()) return;
+  await tick();
+}
 
 ext.tabs.onActivated.addListener(({ tabId, windowId }) => {
   locked(() => wake(tabId, windowId));

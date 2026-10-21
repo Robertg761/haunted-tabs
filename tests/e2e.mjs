@@ -309,6 +309,21 @@ try {
   const later = (await ask({ type: 'snapshot' })).tabs.find((t) => t.url.startsWith(`${origin}/plain`));
   check(later?.title === 'Plain page', `and the popup remembers it ("${later?.title}")`);
   await ask({ type: 'exorcise' });
+
+  // The Graveyard removes graves through the worker, in the same queue as burials.
+  const gravesNow = async () => (await sw.evaluate(async () => (await chrome.storage.local.get('graveyard')).graveyard)) ?? [];
+  const before = await gravesNow();
+  const plainTabId = await sw.evaluate(async (url) => (await chrome.tabs.query({})).find((t) => t.url.startsWith(url))?.id, `${origin}/plain`);
+  const [removeRes] = await Promise.all([
+    ask({ type: 'removeGraves', ids: before.map((g) => g.id) }),
+    ask({ type: 'bury', tabId: plainTabId }),
+  ]);
+  const afterGraves = await gravesNow();
+  check(removeRes?.ok === true, 'removeGraves answers ok');
+  check(
+    afterGraves.length === 1 && afterGraves[0].url.startsWith(`${origin}/plain`) && !afterGraves.some((g) => before.some((b) => b.id === g.id)),
+    `removing graves never loses a burial made at the same moment (${afterGraves.length} left)`,
+  );
 } catch (err) {
   console.error(err);
   failures++;
