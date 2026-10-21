@@ -13,6 +13,8 @@ import { prefersReducedMotion } from './effects/overlay';
 interface Instance {
   /** False once the extension that injected this copy was reloaded or updated. */
   alive(): boolean;
+  /** Whether this copy saw the person type, which a copy taking over must not forget. */
+  dirty?(): boolean;
 }
 
 declare global {
@@ -278,10 +280,62 @@ function hasEdits(root: Document | ShadowRoot, depth: number): boolean {
   }
   if (depth >= 4) return false;
   for (const el of Array.from(root.querySelectorAll('*'))) {
-    const inner = el.shadowRoot ?? frameDocument(el);
-    if (inner && hasEdits(inner, depth + 1)) return true;
+    if (el.hasAttribute(OUR_ATTR)) continue;
+    const shadow = shadowOf(el);
+    if (shadow && hasEdits(shadow, depth + 1)) return true;
+    const frame = frameDocument(el);
+    if (frame) {
+      watchFrame(frame);
+      if (touchedFrames.has(frame) && editedFrame(frame)) return true;
+      if (hasEdits(frame, depth + 1)) return true;
+    }
   }
   return false;
+}
+
+/** A shadow root, closed ones included where the browser lets an extension see them. */
+function shadowOf(el: Element): ShadowRoot | null {
+  try {
+    const gecko = (el as Element & { openOrClosedShadowRoot?: ShadowRoot | null }).openOrClosedShadowRoot;
+    if (gecko !== undefined) return gecko ?? null;
+    const dom = (globalThis as { chrome?: { dom?: { openOrClosedShadowRoot?(e: Element): ShadowRoot | null } } }).chrome?.dom;
+    if (dom?.openOrClosedShadowRoot && el instanceof HTMLElement) return dom.openOrClosedShadowRoot(el) ?? null;
+  } catch {
+    // Fall back to what the page shows anyone.
+  }
+  return el.shadowRoot;
+}
+
+/** Same-origin frames the person has been in: rich editors (TinyMCE, CKEditor) live in one. */
+const touchedFrames = new WeakSet<Document>();
+const watchedFrames = new WeakSet<Document>();
+
+/** Typing in a frame never reaches the top document, so listen in the frame itself. */
+function watchFrame(doc: Document): void {
+  if (watchedFrames.has(doc)) return;
+  watchedFrames.add(doc);
+  try {
+    doc.addEventListener('input', onInput, true);
+  } catch {
+    // A frame that went away meanwhile.
+  }
+}
+
+/** An editable frame (contenteditable or designMode) that holds something. */
+function editedFrame(doc: Document): boolean {
+  const body = doc.body as HTMLElement | null;
+  if (doc.designMode === 'on' && !!body?.textContent?.trim()) return true;
+  return Array.from(doc.querySelectorAll<HTMLElement>('[contenteditable]')).some((el) => el.isContentEditable && !!el.textContent?.trim());
+}
+
+/** Focus moving into a same-origin frame blurs this window: note the frame and start listening in it. */
+function onWindowBlur(): void {
+  setTimeout(() => {
+    const doc = document.activeElement ? frameDocument(document.activeElement) : null;
+    if (!doc) return;
+    touchedFrames.add(doc);
+    watchFrame(doc);
+  }, 0);
 }
 
 /** Elements of another frame belong to another realm, so they are told apart by name, not instanceof. */
@@ -337,16 +391,23 @@ function editingNow(): boolean {
   let el: Element | null = document.activeElement;
   for (let i = 0; el && i < 8; i++) {
     if ((el as HTMLElement).isContentEditable) return true;
-    el = el.shadowRoot?.activeElement ?? frameDocument(el)?.activeElement ?? null;
+    el = shadowOf(el)?.activeElement ?? frameDocument(el)?.activeElement ?? null;
   }
   return false;
 }
 
 function onInput(e: Event): void {
-  // Typing inside a shadow root reaches the document retargeted to its host; the path still has the field.
+  // Any real edit counts, wherever it happened: from a closed shadow root the
+  // path starts at its host, and a person typing is never a false alarm.
+  if (e.isTrusted) {
+    dirtyByInput = true;
+    return;
+  }
+  // Scripted input on a field (some frameworks re-fire it) counts too: when unsure, it is unsaved.
   const t = e.composedPath()[0] ?? e.target;
-  if (!(t instanceof HTMLElement)) return;
-  if (t.isContentEditable || t.localName === 'input' || t.localName === 'textarea' || t.localName === 'select') dirtyByInput = true;
+  if (!t || typeof (t as Element).localName !== 'string') return;
+  const el = t as HTMLElement;
+  if (el.isContentEditable || el.localName === 'input' || el.localName === 'textarea' || el.localName === 'select') dirtyByInput = true;
 }
 
 function onSubmit(): void {
@@ -373,6 +434,7 @@ function retire(): void {
   document.removeEventListener('input', onInput, true);
   document.removeEventListener('submit', onSubmit, true);
   document.removeEventListener(TAKEOVER, onTakeover);
+  removeEventListener('blur', onWindowBlur, true);
 }
 
 function onMessage(msg: PageCommand, _sender: chrome.runtime.MessageSender, sendResponse: (response?: unknown) => void): void {
@@ -449,9 +511,12 @@ function onMessage(msg: PageCommand, _sender: chrome.runtime.MessageSender, send
 // (Chrome) or not (Firefox), so it hears that as a DOM event.
 const previous = window.__hauntedTabs;
 if (!previous || (typeof previous === 'object' && !previous.alive())) {
+  // Typing the old copy saw is still unsaved, whoever answers for the page now.
+  if (typeof previous === 'object') dirtyByInput = !!previous.dirty?.();
   document.dispatchEvent(new CustomEvent(TAKEOVER));
-  window.__hauntedTabs = { alive };
+  window.__hauntedTabs = { alive, dirty: () => dirtyByInput };
   document.addEventListener('input', onInput, true);
+  addEventListener('blur', onWindowBlur, true);
   document.addEventListener('submit', onSubmit, true);
   document.addEventListener(TAKEOVER, onTakeover);
   ext.runtime.onMessage.addListener(onMessage);

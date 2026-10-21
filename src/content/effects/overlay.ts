@@ -67,9 +67,11 @@ function rootTrapsLayers(cs: CSSStyleDeclaration): boolean {
  * lifted into the top layer, which ignores the root's transform and filter. A
  * zoomed <html> is undone, so our pixels stay the viewport's pixels.
  */
-export function attachHost(host: HTMLElement): void {
+export function attachHost(host: HTMLElement, z: number): void {
   const root = document.documentElement;
   root.appendChild(host);
+  for (const h of [...hosts.keys()]) if (!h.isConnected) hosts.delete(h);
+  hosts.set(host, z);
   let cs: CSSStyleDeclaration;
   try {
     cs = getComputedStyle(root);
@@ -78,10 +80,40 @@ export function attachHost(host: HTMLElement): void {
   }
   const zoom = parseFloat((cs as CSSStyleDeclaration & { zoom?: string }).zoom ?? '') || 1;
   if (Math.abs(zoom - 1) > 0.001) host.style.setProperty('--haunted-unzoom', String(1 / zoom));
-  if (rootTrapsLayers(cs) && typeof host.showPopover === 'function') {
+  const lifted = [...hosts.keys()].some((h) => h !== host && isLifted(h));
+  if ((lifted || rootTrapsLayers(cs)) && typeof host.showPopover === 'function') liftAll();
+}
+
+/** Our hosts on the page and their stacking order (Z), so lifted ones can be kept in that order. */
+const hosts = new Map<HTMLElement, number>();
+
+function isLifted(h: HTMLElement): boolean {
+  try {
+    return h.matches(':popover-open');
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The top layer stacks by the order things were shown, not by z-index, and one
+ * lifted host would sit above every unlifted one. So when one host goes up they
+ * all do, shown again bottom to top in Z order. It all happens in one task, so
+ * nothing is painted in between.
+ */
+function liftAll(): void {
+  const order = [...hosts.entries()].sort((a, b) => a[1] - b[1]).map(([h]) => h);
+  for (const h of order) {
     try {
-      host.popover = 'manual';
-      host.showPopover();
+      if (isLifted(h)) h.hidePopover();
+    } catch {
+      // Not shown after all.
+    }
+  }
+  for (const h of order) {
+    try {
+      h.popover = 'manual';
+      h.showPopover();
     } catch {
       // Stays where it is: still there, just not lifted.
     }
@@ -101,7 +133,7 @@ export function createOverlay(name: EffectName, css = ''): Overlay {
   const layer = document.createElement('div');
   layer.className = 'layer';
   root.append(style, layer);
-  attachHost(host);
+  attachHost(host, Z[name]);
   return { host, root, layer, remove: () => host.remove() };
 }
 

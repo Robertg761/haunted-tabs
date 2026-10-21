@@ -379,7 +379,7 @@ function buildGlitch(host: HTMLElement, wrap: HTMLDivElement, root: ShadowRoot, 
   const dim = div('fill dim tint', wrap);
   if (svg) dim.style.display = 'none';
   const { msg, units, words } = buildMessage(wrap, message, rand);
-  attachHost(host);
+  attachHost(host, Z.possession);
   fitMessage(msg, words, units.length);
   const box = msg.getBoundingClientRect();
   const pad = Math.max(12, vh * 0.03);
@@ -779,7 +779,7 @@ function calm(message: string, duration: number, seed: number): Scene {
     const vignette = div('fill vignette', wrap);
     const { msg, units, words } = buildMessage(wrap, message, rand);
     for (const g of units) g.el.classList.remove('h');
-    attachHost(host);
+    attachHost(host, Z.possession);
     fitMessage(msg, words, units.length);
     const ghost = placeGhost(wrap, rand, msg.getBoundingClientRect().top);
     wrap.insertBefore(ghost, msg.parentElement);
