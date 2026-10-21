@@ -28,14 +28,16 @@ import {
   type Web,
 } from './cobwebs-model';
 import {
-  CORE_WIDTH,
   HUES,
   LEVELS,
-  SHADOW_WIDTH,
+  PASS_OFFSET,
+  PASS_ON,
+  PASS_WIDTH,
   backgroundLum,
   dewSprite,
   dropSprites,
   glintSprite,
+  hueIndex,
   paletteFor,
   sheenStyles,
   strokeStyles,
@@ -83,7 +85,7 @@ const OUR_ATTR = 'data-haunted-tabs';
 const MAX_WEBS = 8;
 const STEP_MS = 1000 / 60;
 const GRAVITY = 0.05;
-const DAMPING = 0.982;
+const DAMPING = 0.978;
 const ITERATIONS = 5;
 const STIFFNESS = 0.92;
 const CUT_SPEED = 4;
@@ -120,6 +122,10 @@ export class Cobwebs {
   private host: HTMLElement | null = null;
   private canvas: HTMLCanvasElement | null = null;
   private ctx: CanvasRenderingContext2D | null = null;
+  private base: HTMLCanvasElement | null = null;
+  private baseCtx: CanvasRenderingContext2D | null = null;
+  /** Calm webs already painted into the base layer. */
+  private inBase = new Set<Web>();
   private particles: Particle[] = [];
   private strands: Strand[] = [];
   private webs: Web[] = [];
@@ -144,7 +150,8 @@ export class Cobwebs {
   private winY = scrollY;
   private elementScroll = new WeakMap<Element, { left: number; top: number }>();
 
-  private gust = { start: -1e9, dur: 1, strength: 0, dx: 1, dy: 0 };
+  private gust = { start: -1e9, dur: 1, strength: 0, dx: 1, dy: 0, cx: 0, cy: 0, r: 1 };
+  private settleDamp = DAMPING;
   private windX = 0;
   private windY = 0;
   private tails = 0;
@@ -153,6 +160,7 @@ export class Cobwebs {
   private growAfterMs = 0;
   private growTimer: number | undefined;
   private idleTimer: number | undefined;
+  private sweepTimer: number | undefined;
   private lastActivity = Date.now();
   private lastGrowth = Date.now();
   private readonly reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -161,13 +169,14 @@ export class Cobwebs {
   // Scratch buffers for the connectivity pass and draw ordering, grown as needed.
   private parent = new Int32Array(0);
   private degree = new Int32Array(0);
-  private anchored = new Uint8Array(0);
+  private anchored = new Int32Array(0);
+  private compSize = new Int32Array(0);
   private sumX = new Float64Array(0);
   private sumY = new Float64Array(0);
   private sumN = new Int32Array(0);
   private order = new Int32Array(0);
-  private bucketCount = new Int32Array(2 * 3 * LEVELS);
-  private bucketStart = new Int32Array(2 * 3 * LEVELS);
+  private bucketCount = new Int32Array(2 * LEVELS);
+  private bucketStart = new Int32Array(2 * LEVELS);
   private glintS = new Int32Array(MAX_GLINTS);
   private glintU = new Float64Array(MAX_GLINTS);
   private glintI = new Float64Array(MAX_GLINTS);
@@ -194,7 +203,10 @@ export class Cobwebs {
   /** Lay `count` webs over the page, already spun as if they grew while you were away, or spin them now. */
   add(count: number, weave = false): void {
     if (count <= 0) return;
-    const want = Math.min(MAX_WEBS, this.count + count);
+    // A sweep that is still fading must not tear down the webs laid after it.
+    if (this.sweepTimer !== undefined) clearTimeout(this.sweepTimer);
+    this.sweepTimer = undefined;
+    const want = Math.min(this.maxWebs(), this.count + count);
     let guard = 0;
     while (this.count < want && guard++ < MAX_WEBS * 2) {
       const slot = this.freeSlot();
@@ -223,7 +235,7 @@ export class Cobwebs {
       const now = Date.now();
       if (now - this.lastActivity < this.growAfterMs || now - this.lastGrowth < this.growAfterMs) return;
       this.lastGrowth = now;
-      if (this.count < MAX_WEBS) this.add(1, true);
+      if (this.count < this.maxWebs()) this.add(1, true);
     }, 1000);
   }
 
@@ -235,7 +247,68 @@ export class Cobwebs {
     // Hidden pages get no animation frames, so make sure the webs go even then.
     if (document.visibilityState === 'visible' && (this.particles.length || this.spiders.length)) this.fadeAll(SWEEP_FADE);
     else this.teardown();
-    setTimeout(() => (this.particles.length || this.host) && this.teardown(), 2500);
+    if (this.sweepTimer !== undefined) clearTimeout(this.sweepTimer);
+    this.sweepTimer = window.setTimeout(() => {
+      this.sweepTimer = undefined;
+      if (this.particles.length || this.host) this.teardown();
+    }, 2500);
+  }
+
+  /** Fewer webs on a small window: eight fill a big screen, four a phone-sized one. */
+  private maxWebs(): number {
+    const area = (innerWidth * innerHeight) / (1280 * 800);
+    return clamp(Math.round(4 + 4 * area), 4, MAX_WEBS);
+  }
+
+  /** Visible window size, never the document's (quirks mode) or under the scrollbars. */
+  private view(): { w: number; h: number } {
+    const de = document.documentElement;
+    return { w: Math.min(de.clientWidth || innerWidth, innerWidth), h: Math.min(de.clientHeight || innerHeight, innerHeight) };
+  }
+
+  /** How much to shrink webs on a small window. */
+  private sizeScale(): number {
+    const { w, h } = this.view();
+    return clamp(Math.min(w, h) / 700, 0.55, 1);
+  }
+
+  /**
+   * Somewhere to hang a web of radius R: try a few spots and keep the one that
+   * overlaps other webs least and sits least over text.
+   */
+  private placeHub(R: number, x0: number, x1: number, y0: number, y1: number): { x: number; y: number } {
+    let best = { x: (x0 + x1) / 2, y: (y0 + y1) / 2 };
+    let bestScore = Infinity;
+    for (let i = 0; i < 28; i++) {
+      const x = rand(x0, x1);
+      const y = rand(y0, y1);
+      let score = Math.random() * 0.05;
+      for (const w of this.webs) {
+        if (w.live <= 0 || !w.R) continue;
+        const keep = (R + w.R) * 1.05;
+        const d = Math.hypot(w.cx - x, w.cy - y);
+        if (d < keep) score += 2 * (1 - d / keep);
+      }
+      if (score < bestScore && score < 2) score += this.overText(x, y) * 0.6;
+      if (score < bestScore) {
+        bestScore = score;
+        best = { x, y };
+      }
+    }
+    return best;
+  }
+
+  /** 1 if the point is over reading matter (text, links, controls), else 0. */
+  private overText(x: number, y: number): number {
+    try {
+      let el = document.elementFromPoint(x, y);
+      for (let i = 0; el && i < 3; i++, el = el.parentElement) {
+        if (/^(P|H[1-6]|LI|A|BUTTON|LABEL|INPUT|TEXTAREA|SELECT|TD|TH|PRE|CODE|BLOCKQUOTE|FIGCAPTION|DT|DD)$/.test(el.tagName)) return 1;
+      }
+    } catch {
+      // Not every document can answer.
+    }
+    return 0;
   }
 
   // --- building --------------------------------------------------------------
@@ -267,6 +340,18 @@ export class Cobwebs {
       palette: 0,
       hue: Math.random(),
       points: 0,
+      cx: 0,
+      cy: 0,
+      R: 0,
+      stir: true,
+      calm: 0,
+      layer: null,
+      layerOk: false,
+      lx: 0,
+      ly: 0,
+      lw: 0,
+      lh: 0,
+      vacantSince: this.simTime,
     };
     this.webs.push(web);
     return web;
@@ -276,7 +361,7 @@ export class Cobwebs {
     const p: Particle = {
       x, y, px: x, py: y, pin, web,
       alpha: 1, fade: 0, falling: false, active: !web.weaving, tail: false, life: 0, dead: false,
-      idx: 0, ri: -1, rk: -1, phase: Math.random() * TAU,
+      idx: 0, ri: -1, rk: -1, phase: Math.random() * TAU, rx: NaN, ry: NaN,
     };
     this.particles.push(p);
     return p;
@@ -387,6 +472,9 @@ export class Cobwebs {
       frame.push(a.wall && b.wall ? null : this.strand(web, a.p, b.p, FRAME, rand(1.0, 1.02), 1.7));
     }
     web.hub = hub;
+    web.cx = hub.x;
+    web.cy = hub.y;
+    web.R = R;
     web.radials = radials;
     web.radialStrands = radialStrands;
     return { radials, radialStrands, frame, hubRings, spiral };
@@ -394,10 +482,10 @@ export class Cobwebs {
 
   /** A web filling a corner of the window, hub near the corner, glued to both edges and the page. */
   private buildCorner(web: Web, ax: number, ay: number, weave: boolean): OrbPlan {
-    // Glue to the visible frame, not under the page's scrollbars.
-    const vw = document.documentElement.clientWidth || innerWidth;
-    const vh = document.documentElement.clientHeight || innerHeight;
-    const R = clamp(Math.min(vw, vh) * rand(0.26, 0.36), 110, weave ? 190 : 270);
+    // Glue to the visible frame: not under the scrollbars, not the whole quirks-mode document.
+    const { w: vw, h: vh } = this.view();
+    const short = Math.min(vw, vh);
+    const R = clamp(short * rand(0.26, 0.36), Math.min(110, short * 0.26), Math.min(weave ? 190 : 270, short * 0.42));
     const cx0 = ax ? vw : 0;
     const cy0 = ay ? vh : 0;
     const sx = ax ? -1 : 1;
@@ -414,7 +502,7 @@ export class Cobwebs {
       if (s * sy < 0) t = Math.min(t, (cy0 - hub.y) / s);
       const len = R * rand(0.86, 1.08);
       if (t < len) return { len: t, wall: true, pin: (x, y) => this.viewportPin(x, y, ax, ay) };
-      return { len, wall: false, pin: Math.random() < 0.75 ? (x, y) => this.pagePin(x, y) : undefined };
+      return { len, wall: false, pin: (x, y) => this.pagePin(x, y) };
     }, !weave);
     if (!weave) this.dress(web, plan, () => {
       // Stray bridge lines out along the window edges.
@@ -428,10 +516,11 @@ export class Cobwebs {
 
   /** A small orb web hanging on one thread from the top of the window. */
   private buildHanging(web: Web, weave: boolean): OrbPlan {
-    const vw = innerWidth;
-    const topX = rand(0.3, 0.7) * vw;
-    const depth = rand(0.22, 0.38) * innerHeight;
-    const R = rand(58, 88);
+    const { w: vw, h: vh } = this.view();
+    const R = rand(58, 88) * this.sizeScale();
+    const spot = this.placeHub(R, vw * 0.25, vw * 0.75, vh * 0.2, vh * 0.42);
+    const topX = spot.x;
+    const depth = spot.y;
     const top = this.particle(web, topX, 0, this.viewportPin(topX, 0, 0, 0));
     let prev = top;
     let prevS: Strand | null = null;
@@ -451,7 +540,7 @@ export class Cobwebs {
     const plan = this.orb(web, prev, R, Math.round(rand(10, 13)), Math.round(rand(5, 7)), () => ({
       len: R * rand(0.9, 1.1),
       wall: false,
-      pin: Math.random() < 0.85 ? (x, y) => this.pagePin(x, y) : undefined,
+      pin: (x, y) => this.pagePin(x, y),
     }), !weave);
     web.dragline = drag;
     return plan;
@@ -459,10 +548,10 @@ export class Cobwebs {
 
   /** An orb web strung across open page, every end glued to the content. */
   private buildFree(web: Web, weave: boolean): OrbPlan {
-    const x = rand(0.2, 0.8) * innerWidth;
-    const y = rand(0.28, 0.78) * innerHeight;
+    const { w: vw, h: vh } = this.view();
+    const R = (weave ? rand(80, 120) : rand(80, 140)) * this.sizeScale();
+    const { x, y } = this.placeHub(R, Math.min(vw * 0.5, R * 0.8), Math.max(vw * 0.5, vw - R * 0.8), Math.min(vh * 0.5, vh * 0.25 + R * 0.3), Math.max(vh * 0.5, vh - R * 0.8));
     const hub = this.particle(web, x, y);
-    const R = weave ? rand(80, 120) : rand(80, 140);
     const plan = this.orb(web, hub, R, Math.round(rand(11, 15)), Math.round(rand(6, 8)), () => ({
       len: R * rand(0.88, 1.1),
       wall: false,
@@ -510,15 +599,27 @@ export class Cobwebs {
     for (const p of probes) lum += backgroundLum(p.x, p.y);
     web.palette = paletteFor(lum / probes.length);
     let total = 0;
+    const spiral: Strand[] = [];
     for (const s of this.strands) {
       if (s.web !== web) continue;
       if (s.kind !== STRAY) total++;
-      // Dew: mostly beaded along the sticky spiral.
-      const chance = s.kind === SPIRAL ? (weave ? 0.08 : 0.13) : s.kind === RADIAL ? 0.025 : 0;
-      if (Math.random() < chance) {
-        this.dews.push({ s, u: rand(0.22, 0.78), r: rand(0.75, 1.55), x: 0, y: 0, vx: 0, vy: 0, slide: 0, sliding: false, placed: false });
-      }
+      if (s.kind === SPIRAL) spiral.push(s);
     }
+    // Dew gathers in little runs of beads along the sticky spiral, and the
+    // biggest drops hang where the web sags lowest.
+    const bead = (s: Strand, u: number, r: number) => {
+      this.dews.push({ s, u, r, x: 0, y: 0, vx: 0, vy: 0, slide: 0, sliding: false, placed: false });
+      s.rest *= 1 + r * 0.004; // a little heavier: it sags a touch more
+    };
+    for (const s of spiral) {
+      if (Math.random() >= (weave ? 0.035 : 0.06)) continue;
+      const n = Math.round(rand(1.6, 4.2));
+      let u = rand(0.15, 0.35);
+      for (let k = 0; k < n && u < 0.88; k++, u += rand(0.14, 0.26)) bead(s, u, rand(1.7, 2.8));
+    }
+    const vh = this.view().h;
+    const low = spiral.filter((s) => s.a.y < vh && s.b.y < vh).sort((p, q) => q.a.y + q.b.y - (p.a.y + p.b.y));
+    for (let k = 0; k < Math.min(2, low.length); k++) bead(low[Math.floor(Math.random() * Math.min(6, low.length))], rand(0.42, 0.58), rand(2.9, 3.6));
     web.total = total;
     web.intact = total;
     web.live = total;
@@ -536,7 +637,7 @@ export class Cobwebs {
       spider.sit(web.hub);
       this.spiders.push(spider);
     } else {
-      this.settle(web, web.dragline.length ? 420 : 260);
+      this.settle(web);
       if (web.dragline.length) {
         const spider = new Spider(web, web.hub.x, web.hub.y + 1, this.world);
         spider.alpha = 1;
@@ -546,12 +647,30 @@ export class Cobwebs {
     }
   }
 
-  /** Let a freshly laid web sag into place before anyone sees it. */
-  private settle(web: Web, steps: number): void {
+  /**
+   * Let a freshly laid web sag into place before anyone sees it: heavily
+   * damped so it gets there in a few dozen steps instead of swinging for seconds.
+   */
+  private settle(web: Web): void {
+    const steps = web.dragline.length ? 80 : 50;
+    // Work on just this web's points and threads, not everything on the page.
+    const allP = this.particles;
+    const allS = this.strands;
+    const { tails, falling } = this;
+    this.particles = allP.filter((p) => p.web === web);
+    this.strands = allS.filter((st) => st.web === web);
     for (let i = 0; i < steps; i++) {
-      this.integrate(web);
-      this.solve(web);
+      this.integrate(null, i < steps - 6 ? 0.88 : DAMPING);
+      this.solve(null);
     }
+    for (const p of this.particles) {
+      p.px = p.x;
+      p.py = p.y;
+    }
+    this.particles = allP;
+    this.strands = allS;
+    this.tails = tails;
+    this.falling = falling;
     this.breaks.length = 0;
   }
 
@@ -569,28 +688,70 @@ export class Cobwebs {
     const endOf = (i: number) => plan.radials[i][plan.radials[i].length - 1];
     let cur: Particle;
 
+    // Every thread of the web by its end points, to find a way along what is already spun.
+    const links = new Map<Particle, Strand[]>();
+    const laid = new Set<Strand>();
+    for (const s of this.strands) {
+      if (s.web !== web) continue;
+      for (const p of [s.a, s.b]) {
+        const l = links.get(p);
+        if (l) l.push(s);
+        else links.set(p, [s]);
+      }
+    }
+    const lengthOf = (s: Strand) => Math.hypot(s.a.x - s.b.x, s.a.y - s.b.y);
+
     const along = (s: Strand, lay: boolean) => {
       const rev = cur === s.b;
       const to = rev ? s.a : s.b;
-      const len = Math.hypot(s.a.x - s.b.x, s.a.y - s.b.y);
-      legs.push({ s, from: cur, to, rev, lay, t0: 0, t1: 0, base: len / (lay ? LAY_SPEED[s.kind] : WALK_SPEED) });
+      legs.push({ s, from: cur, to, rev, lay, t0: 0, t1: 0, base: lengthOf(s) / (lay ? LAY_SPEED[s.kind] : WALK_SPEED) });
+      if (lay) laid.add(s);
       cur = to;
     };
     const straight = (to: Particle) => {
       legs.push({ s: null, from: cur, to, rev: false, lay: false, t0: 0, t1: 0, base: Math.hypot(to.x - cur.x, to.y - cur.y) / WALK_SPEED });
       cur = to;
     };
-    const radialWalk = (i: number, fromK: number, toK: number) => {
-      const rs = plan.radialStrands[i];
-      if (toK > fromK) for (let k = fromK + 1; k <= toK; k++) along(rs[k], false);
-      else for (let k = fromK; k > toK; k--) along(rs[k], false);
-    };
+    /** Walk there along spun threads (shortest way), only crossing open air if there is no sensible path. */
     const goTo = (t: Particle) => {
       if (cur === t) return;
-      if (t === hub && cur.ri >= 0) radialWalk(cur.ri, cur.rk, -1);
-      else if (cur === hub && t.ri >= 0) radialWalk(t.ri, -1, t.rk);
-      else if (cur.ri >= 0 && cur.ri === t.ri) radialWalk(t.ri, cur.rk, t.rk);
-      else straight(t);
+      const direct = Math.hypot(t.x - cur.x, t.y - cur.y);
+      const limit = direct * 3 + 120;
+      const dist = new Map<Particle, number>([[cur, 0]]);
+      const via = new Map<Particle, Strand>();
+      const done = new Set<Particle>();
+      const open: Particle[] = [cur];
+      while (open.length) {
+        let bi = 0;
+        for (let i = 1; i < open.length; i++) if (dist.get(open[i])! < dist.get(open[bi])!) bi = i;
+        const p = open[bi];
+        open[bi] = open[open.length - 1];
+        open.pop();
+        if (p === t) break;
+        done.add(p);
+        const d = dist.get(p)!;
+        for (const s of links.get(p) ?? []) {
+          if (!laid.has(s)) continue;
+          const q = s.a === p ? s.b : s.a;
+          if (done.has(q)) continue;
+          const nd = d + lengthOf(s);
+          if (nd > limit || nd >= (dist.get(q) ?? Infinity)) continue;
+          if (!dist.has(q)) open.push(q);
+          dist.set(q, nd);
+          via.set(q, s);
+        }
+      }
+      if (!via.has(t)) {
+        straight(t);
+        return;
+      }
+      const path: Strand[] = [];
+      for (let p = t; p !== cur; ) {
+        const s = via.get(p)!;
+        path.push(s);
+        p = s.a === p ? s.b : s.a;
+      }
+      for (let i = path.length - 1; i >= 0; i--) along(path[i], false);
     };
     const layRadial = (i: number, outward: boolean) => {
       const rs = plan.radialStrands[i];
@@ -692,10 +853,10 @@ export class Cobwebs {
       if (f > 0 && s.f <= 0) {
         s.a.active = s.b.active = true;
         // A fresh thread starts exactly where it is anchored.
-        for (const p of [s.a, s.b]) {
-          p.px = p.x;
-          p.py = p.y;
-        }
+        s.a.px = s.a.x;
+        s.a.py = s.a.y;
+        s.b.px = s.b.x;
+        s.b.py = s.b.y;
       }
       s.f = f;
     }
@@ -775,11 +936,19 @@ export class Cobwebs {
     const host = document.createElement('div');
     host.setAttribute(OUR_ATTR, 'cobwebs');
     const root = host.attachShadow({ mode: 'closed' });
+    const style = document.createElement('style');
+    style.textContent = `
+      canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; pointer-events: none; z-index: ${Z.cobwebs}; }
+      @media print { :host, canvas { display: none !important; } }
+    `;
+    // Calm webs are drawn once into the base layer; only what moves is redrawn on top.
+    const base = document.createElement('canvas');
     const canvas = document.createElement('canvas');
-    canvas.style.cssText = `position:fixed;inset:0;width:100vw;height:100vh;pointer-events:none;z-index:${Z.cobwebs};`;
-    root.append(canvas);
+    root.append(style, base, canvas);
     document.documentElement.appendChild(host);
     this.host = host;
+    this.base = base;
+    this.baseCtx = base.getContext('2d');
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d');
     this.reported = '';
@@ -792,9 +961,14 @@ export class Cobwebs {
     this.world.vh = innerHeight;
     if (!this.canvas || !this.ctx) return;
     this.dpr = Math.min(2, devicePixelRatio || 1);
-    this.canvas.width = Math.round(innerWidth * this.dpr);
-    this.canvas.height = Math.round(innerHeight * this.dpr);
-    this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    for (const [c, g] of [[this.canvas, this.ctx], [this.base, this.baseCtx]] as const) {
+      if (!c || !g) continue;
+      c.width = Math.round(innerWidth * this.dpr);
+      c.height = Math.round(innerHeight * this.dpr);
+      g.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    }
+    this.inBase.clear();
+    for (const w of this.webs) w.stir = true;
     this.wake();
   };
 
@@ -809,6 +983,19 @@ export class Cobwebs {
     addEventListener('touchmove', this.onActivity, opts);
     addEventListener('resize', this.resize, opts);
     document.addEventListener('visibilitychange', this.onVisibility, opts);
+  }
+
+  private unlisten(): void {
+    if (!this.listening) return;
+    this.listening = false;
+    const opts = { capture: true };
+    removeEventListener('pointermove', this.onPointer, opts);
+    removeEventListener('scroll', this.onScroll, opts);
+    removeEventListener('wheel', this.onActivity, opts);
+    removeEventListener('keydown', this.onActivity, opts);
+    removeEventListener('touchmove', this.onActivity, opts);
+    removeEventListener('resize', this.resize, opts);
+    document.removeEventListener('visibilitychange', this.onVisibility, opts);
   }
 
   private onVisibility = (): void => {
@@ -887,29 +1074,71 @@ export class Cobwebs {
     }
   }
 
-  /** Now and then the air stirs, the spider fidgets, a dew drop runs. */
+  /** Now and then the air stirs somewhere, a spider fidgets or moves in, a dew drop runs. */
   private scheduleIdle(): void {
     if (this.idleTimer !== undefined || this.reduced) return;
     this.idleTimer = window.setTimeout(() => {
       this.idleTimer = undefined;
       if (!this.host || (!this.particles.length && !this.spiders.length)) return;
       if (document.visibilityState === 'visible') {
-        if (Math.random() < 0.75 && this.simTime > this.gust.start + this.gust.dur) {
-          const a = rand(-0.5, 0.5) + (Math.random() < 0.5 ? 0 : Math.PI);
-          this.gust = { start: this.simTime, dur: rand(2400, 4200), strength: rand(0.4, 1), dx: Math.cos(a), dy: Math.sin(a) * 0.4 };
-        }
+        if (Math.random() < 0.75 && this.simTime > this.gust.start + this.gust.dur + 1500) this.startGust();
         for (const s of this.spiders) if (s.sitting && Math.random() < 0.6) s.twitch();
         if (Math.random() < 0.3) this.startSlide();
+        this.moveIn();
         this.wake();
       }
       this.scheduleIdle();
     }, rand(7000, 16000));
   }
 
+  /** A breath of air through one part of the window: only the webs near it stir. */
+  private startGust(): void {
+    const live = this.webs.filter((w) => w.live > 0 && w.R > 0);
+    const target = live.length ? live[Math.floor(Math.random() * live.length)] : null;
+    const a = rand(-0.5, 0.5) + (Math.random() < 0.5 ? 0 : Math.PI);
+    this.gust = {
+      start: this.simTime,
+      dur: rand(2400, 4000),
+      strength: rand(0.45, 1),
+      dx: Math.cos(a),
+      dy: Math.sin(a) * 0.4,
+      cx: target ? target.cx : rand(0, innerWidth),
+      cy: target ? target.cy : rand(0, innerHeight),
+      r: target ? target.R * rand(1.3, 2) : Math.max(innerWidth, innerHeight) * 0.3,
+    };
+  }
+
+  /** After a long quiet spell a spider climbs back in to an empty web. */
+  private moveIn(): void {
+    if (Date.now() - this.lastActivity < 25_000 || this.spiders.length >= 2) return;
+    for (const web of this.webs) {
+      if (web.live <= 0 || web.weaving || !web.radials.length || this.simTime - web.vacantSince < 20_000) continue;
+      if (this.spiderOf(web) || web.hub.dead || web.hub.falling) continue;
+      // In along the radial whose end is nearest the window edge.
+      let best: Particle[] | null = null;
+      let bestD = Infinity;
+      for (const r of web.radials) {
+        const end = r[r.length - 1];
+        if (!end || end.dead || end.falling || r.some((p) => p.dead || p.falling)) continue;
+        const d = Math.min(end.x, end.y, innerWidth - end.x, innerHeight - end.y);
+        if (d < bestD) {
+          bestD = d;
+          best = r;
+        }
+      }
+      if (!best) continue;
+      const spider = new Spider(web, web.hub.x, web.hub.y, this.world);
+      spider.enter(best, web.hub);
+      this.spiders.push(spider);
+      return;
+    }
+  }
+
   private startSlide(): void {
-    const candidates = this.dews.filter((d) => !d.sliding && d.placed && !d.s.dead && !d.s.a.falling);
-    for (let tries = 0; tries < 6 && candidates.length; tries++) {
-      const d = candidates[Math.floor(Math.random() * candidates.length)];
+    const n = this.dews.length;
+    for (let tries = 0; tries < 8 && n; tries++) {
+      const d = this.dews[Math.floor(Math.random() * n)];
+      if (d.sliding || !d.placed || d.s.dead || d.s.a.falling) continue;
       const q = curvePoint(d.s, d.u);
       const len = Math.hypot(q.tx, q.ty) || 1;
       if (Math.abs(q.ty / len) > 0.35) {
@@ -947,7 +1176,7 @@ export class Cobwebs {
     this.calmFrames = motion < 0.05 && !busy ? this.calmFrames + 1 : 0;
     if (this.particles.length === 0 && this.spiders.length === 0) {
       this.teardown();
-    } else if (this.calmFrames < 40) {
+    } else if (this.calmFrames < 30) {
       this.raf = requestAnimationFrame(this.tick);
     }
   };
@@ -960,6 +1189,9 @@ export class Cobwebs {
     const env = gt > 0 && gt < 1 ? Math.sin(Math.PI * gt) ** 2 * g.strength : 0;
     this.windX = env * g.dx * 0.03;
     this.windY = env * g.dy * 0.03;
+    // Once the air has passed, the threads settle quickly instead of ringing for seconds.
+    const after = (this.simTime - g.start - g.dur) / 1400;
+    this.settleDamp = after > 0 && after < 1 ? 0.93 + (DAMPING - 0.93) * after : gt > 0.75 && gt < 1 ? DAMPING - (gt - 0.75) * 0.2 : DAMPING;
     const w = this.world;
     w.offX = this.offX;
     w.offY = this.offY;
@@ -969,12 +1201,17 @@ export class Cobwebs {
     w.ptrSeen = this.pointer.seen;
 
     for (const web of this.webs) if (web.weaving) this.advanceWeave(web);
-    const motion = this.integrate(null);
+    const motion = this.integrate(null, 0);
     this.solve(null);
     if (this.breaks.length) this.applyBreaks();
     this.stepDew();
     for (const s of this.spiders) s.step();
-    for (let i = this.sparks.length - 1; i >= 0; i--) if (--this.sparks[i].life <= 0) this.sparks.splice(i, 1);
+    const sparks = this.sparks;
+    for (let i = sparks.length - 1; i >= 0; i--) {
+      if (--sparks[i].life > 0) continue;
+      sparks[i] = sparks[sparks.length - 1];
+      sparks.pop();
+    }
     if (this.steps % 6 === 0) this.findFallen();
     return motion;
   }
@@ -1045,14 +1282,18 @@ export class Cobwebs {
     return o;
   }
 
-  private integrate(only: Web | null): number {
+  /** One Verlet step. `damp` overrides the damping of ordinary points (for settling). */
+  private integrate(only: Web | null, damp: number): number {
     let motion = 0;
     let tails = 0;
     let falling = 0;
     const t = this.simTime;
+    const g = this.gust;
     const wx = this.windX;
     const wy = this.windY;
     const windy = wx !== 0 || wy !== 0;
+    const r2 = g.r * g.r;
+    const base = damp || this.settleDamp;
     for (const p of this.particles) {
       if (p.dead || (only && p.web !== only)) continue;
       if (p.pin) {
@@ -1063,7 +1304,7 @@ export class Cobwebs {
         continue;
       }
       if (!p.active) continue;
-      let damping = DAMPING;
+      let damping = base;
       let gravity = GRAVITY;
       let gustK = 1;
       if (p.falling) {
@@ -1077,7 +1318,10 @@ export class Cobwebs {
         damping = 0.95;
         gravity = 0.022;
         gustK = 2.4;
-        if (--p.life < 60) p.alpha = Math.max(0, p.life / 60);
+        if (--p.life < 60) {
+          p.alpha = Math.max(0, p.life / 60);
+          p.web.stir = true;
+        }
       } else if (p.web.weaving) {
         damping = 0.9;
         gravity = 0;
@@ -1090,10 +1334,15 @@ export class Cobwebs {
       let fx = 0;
       let fy = 0;
       if (windy && gustK) {
-        const swirl = Math.sin(p.x * 0.011 + t * 0.0021 + p.phase);
-        const k = gustK * (0.55 + 0.45 * swirl);
-        fx = wx * k;
-        fy = wy * k + Math.cos(p.y * 0.013 + t * 0.0017 + p.phase) * Math.abs(wx) * 0.35 * gustK;
+        // The gust is local: full strength at its centre, nothing beyond its reach.
+        const d2 = (p.x - g.cx) ** 2 + (p.y - g.cy) ** 2;
+        if (d2 < r2) {
+          const reach = 1 - d2 / r2;
+          const swirl = Math.sin(p.x * 0.011 + t * 0.0021 + p.phase);
+          const k = gustK * reach * (0.55 + 0.45 * swirl);
+          fx = wx * k;
+          fy = wy * k + Math.cos(p.y * 0.013 + t * 0.0017 + p.phase) * Math.abs(wx) * 0.35 * gustK * reach;
+        }
       }
       if (p.falling && !this.reduced) {
         // Air drag tumbles falling silk: it eddies rather than drops.
@@ -1126,8 +1375,7 @@ export class Cobwebs {
         if (it === 0 && a.falling && b.falling && s.rest > s.rest0 * 0.55) s.rest *= 0.996; // crumpling as it falls
         if (dist > s.rest * s.snap) {
           // Stretched too far: it snaps, somewhere along its length.
-          if (s.kind === TAIL) s.dead = true;
-          else this.breaks.push({ s, u: rand(0.3, 0.7), vx: 0, vy: 0 });
+          if (s.kind !== TAIL) this.breaks.push({ s, u: rand(0.3, 0.7), vx: 0, vy: 0 });
           s.dead = true;
           continue;
         }
@@ -1155,6 +1403,7 @@ export class Cobwebs {
       if (s.dead && s.kind === TAIL) continue;
       const strain = Math.hypot(s.b.x - s.a.x, s.b.y - s.a.y) / Math.max(1, s.rest);
       s.dead = true;
+      s.web.stir = true;
       if (s.kind === TAIL) continue;
       const x = s.a.x + (s.b.x - s.a.x) * u;
       const y = s.a.y + (s.b.y - s.a.y) * u;
@@ -1234,18 +1483,34 @@ export class Cobwebs {
       d.vy = (d.vy + (ty - d.y) * 0.22) * 0.78;
       d.x += d.vx;
       d.y += d.vy;
+      if (d.sliding || Math.abs(d.vx) + Math.abs(d.vy) > 0.02) s.web.stir = true;
     }
-    for (let i = this.drips.length - 1; i >= 0; i--) {
-      const r = this.drips[i];
+    const drips = this.drips;
+    for (let i = drips.length - 1; i >= 0; i--) {
+      const r = drips[i];
       r.vy += 0.22;
       r.vx *= 0.99;
       r.x += r.vx;
       r.y += r.vy;
-      if (r.y > innerHeight + 20) this.drips.splice(i, 1);
+      if (r.y <= innerHeight + 20) continue;
+      drips[i] = drips[drips.length - 1];
+      drips.pop();
     }
   }
 
-  /** Pieces no longer held by anything glued down drop away, tumbling, and fade. */
+  private root(i: number): number {
+    const parent = this.parent;
+    while (parent[i] !== i) {
+      parent[i] = parent[parent[i]];
+      i = parent[i];
+    }
+    return i;
+  }
+
+  /**
+   * Pieces no longer held by anything glued down drop away, tumbling, and fade.
+   * So do small scraps hanging from only a glue point or two (after a scroll, say).
+   */
   private findFallen(): void {
     const ps = this.particles;
     const n = ps.length;
@@ -1253,20 +1518,14 @@ export class Cobwebs {
       const size = Math.max(256, n * 2);
       this.parent = new Int32Array(size);
       this.degree = new Int32Array(size);
-      this.anchored = new Uint8Array(size);
+      this.anchored = new Int32Array(size);
+      this.compSize = new Int32Array(size);
       this.sumX = new Float64Array(size);
       this.sumY = new Float64Array(size);
       this.sumN = new Int32Array(size);
     }
     const parent = this.parent;
     const deg = this.degree;
-    const find = (i: number): number => {
-      while (parent[i] !== i) {
-        parent[i] = parent[parent[i]];
-        i = parent[i];
-      }
-      return i;
-    };
     for (let i = 0; i < n; i++) {
       ps[i].idx = i;
       parent[i] = i;
@@ -1280,26 +1539,36 @@ export class Cobwebs {
       if (s.dead || s.a.dead || s.b.dead) continue;
       if (s.kind !== STRAY && s.kind !== TAIL) s.web.intact++;
       if (s.f <= 0) continue;
-      const ra = find(s.a.idx);
-      const rb = find(s.b.idx);
+      const ra = this.root(s.a.idx);
+      const rb = this.root(s.b.idx);
       if (ra !== rb) parent[ra] = rb;
       deg[s.a.idx]++;
       deg[s.b.idx]++;
     }
-    this.anchored.fill(0, 0, n);
-    for (let i = 0; i < n; i++) if (ps[i].pin && !ps[i].dead) this.anchored[find(i)] = 1;
-    this.sumN.fill(0, 0, n);
-    let newlyFalling = false;
+    const pins = this.anchored;
+    const size = this.compSize;
+    pins.fill(0, 0, n);
+    size.fill(0, 0, n);
     for (let i = 0; i < n; i++) {
       const p = ps[i];
       if (p.dead) continue;
       p.web.points++;
-      if (p.falling || p.web.weaving) continue;
+      const r = this.root(i);
+      size[r]++;
+      if (p.pin) pins[r]++;
+    }
+    this.sumN.fill(0, 0, n);
+    let newlyFalling = false;
+    for (let i = 0; i < n; i++) {
+      const p = ps[i];
+      if (p.dead || p.falling || p.web.weaving) continue;
       const web = p.web;
       const torn = web.total > 0 && web.intact < web.total * 0.6;
       if (torn) p.pin = undefined; // too damaged to hold: the whole web lets go
-      const root = find(i);
-      if (torn || !this.anchored[root]) {
+      const root = this.root(i);
+      const scrap = pins[root] <= 2 && size[root] < Math.max(8, web.points * 0.22);
+      if (torn || !pins[root] || scrap) {
+        p.pin = undefined;
         p.falling = true;
         p.active = true;
         p.fade = Math.max(p.fade, this.reduced ? REDUCED_FADE : FALL_FADE);
@@ -1316,7 +1585,7 @@ export class Cobwebs {
       for (let i = 0; i < n; i++) {
         const p = ps[i];
         if (p.dead || !p.falling) continue;
-        const root = find(i);
+        const root = this.root(i);
         const m = this.sumN[root];
         if (!m) continue;
         const h = Math.sin(root * 12.9898 + m * 78.233) * 43758.5453;
@@ -1333,8 +1602,13 @@ export class Cobwebs {
       if (s.dead || s.kind === STRAY || s.kind === TAIL || s.a.falling || s.b.falling || s.a.dead || s.b.dead) continue;
       s.web.live++;
     }
-    for (const w of this.webs) if (w.weaving) w.live = Math.max(1, w.live);
-    this.webs = this.webs.filter((w) => w.points > 0 || w.weaving);
+    let j = 0;
+    for (const w of this.webs) {
+      if (w.weaving) w.live = Math.max(1, w.live);
+      if (w.points > 0 || w.weaving) this.webs[j++] = w;
+      else this.inBase.delete(w);
+    }
+    this.webs.length = j;
     this.report();
   }
 
@@ -1362,7 +1636,10 @@ export class Cobwebs {
     let dead = false;
     for (const s of this.strands) {
       if (!s.dead && (s.a.dead || s.b.dead)) s.dead = true;
-      if (s.dead) dead = true;
+      if (s.dead) {
+        dead = true;
+        s.web.stir = true;
+      }
     }
     if (dead) {
       let j = 0;
@@ -1379,7 +1656,10 @@ export class Cobwebs {
       this.dews.length = k;
     }
     let s = 0;
-    for (const sp of this.spiders) if (sp.state !== 'gone') this.spiders[s++] = sp;
+    for (const sp of this.spiders) {
+      if (sp.state !== 'gone') this.spiders[s++] = sp;
+      else sp.web.vacantSince = this.simTime;
+    }
     this.spiders.length = s;
   }
 
@@ -1414,18 +1694,15 @@ export class Cobwebs {
     const slack = s.rest - d;
     s.flat = true;
     if (slack > 0.02) {
-      // A slack thread sags like a catenary: depth from its spare length.
+      // A slack thread sags like a catenary: depth from its spare length, towards the floor.
       let h = Math.min(Math.sqrt((3 * d * slack) / 8), d * 0.32);
       let nx = -dy / d;
       let ny = dx / d;
-      const gx = this.windX * 8;
-      const gy = 1;
-      const dot = nx * gx + ny * gy;
-      if (dot < 0) {
+      if (ny < 0) {
         nx = -nx;
         ny = -ny;
       }
-      h *= 0.3 + 0.7 * Math.min(1, Math.abs(dot));
+      h *= 0.3 + 0.7 * Math.min(1, ny);
       qx += nx * h * 2;
       qy += ny * h * 2;
       s.flat = h < 0.2;
@@ -1438,19 +1715,71 @@ export class Cobwebs {
     s.c2y = b.y + ((qy - b.y) * 2) / 3;
   }
 
+  /**
+   * Webs that have kept still are drawn once into the base layer and left
+   * there; the top layer is cleared and redrawn each frame with only what
+   * moves: stirred webs, spiders, sparks and falling drops.
+   */
   private draw(): void {
     const ctx = this.ctx;
-    if (!ctx) return;
-    ctx.clearRect(0, 0, innerWidth, innerHeight);
-    ctx.lineCap = 'round';
+    const base = this.baseCtx;
+    if (!ctx || !base) return;
+    // Which webs changed since they were last drawn?
+    for (const p of this.particles) {
+      if (Math.abs(p.x - p.rx) + Math.abs(p.y - p.ry) > 0.1 || p.rx !== p.rx) p.web.stir = true;
+    }
+    let rebuild = false;
+    for (const w of this.webs) {
+      if (w.weaving) w.stir = true;
+      if (w.stir) {
+        w.calm = 0;
+        if (this.inBase.delete(w)) rebuild = true;
+      } else {
+        w.calm++;
+      }
+      w.stir = false;
+    }
+    const vw = innerWidth;
+    const vh = innerHeight;
+    if (rebuild) {
+      base.clearRect(0, 0, vw, vh);
+      for (const w of this.inBase) this.drawWeb(base, w);
+    }
+    for (const w of this.webs) {
+      if (this.inBase.has(w) || w.calm < 6) continue;
+      this.inBase.add(w);
+      this.drawWeb(base, w);
+      this.markDrawn(w);
+    }
+    ctx.clearRect(0, 0, vw, vh);
+    for (const w of this.webs) {
+      if (this.inBase.has(w)) continue;
+      this.drawWeb(ctx, w);
+      this.markDrawn(w);
+    }
+    this.drawLoose(ctx);
+    for (const sp of this.spiders) sp.draw(ctx, sp.web.palette);
+  }
+
+  private markDrawn(w: Web): void {
+    for (const p of this.particles) {
+      if (p.web !== w) continue;
+      p.rx = p.x;
+      p.ry = p.y;
+    }
+  }
+
+  /** One web's threads, light and dew. */
+  private drawWeb(ctx: CanvasRenderingContext2D, web: Web): void {
     const strands = this.strands;
     const n = strands.length;
     if (this.order.length < n) this.order = new Int32Array(Math.max(512, n * 2));
     const counts = this.bucketCount;
     counts.fill(0);
-    // Pass 0: geometry and bucket (palette x width x opacity), counting sort.
+    let any = false;
     for (let i = 0; i < n; i++) {
       const s = strands[i];
+      if (s.web !== web) continue;
       s.vis = false;
       if (s.dead || s.f <= 0) continue;
       this.geometry(s);
@@ -1459,43 +1788,43 @@ export class Cobwebs {
       if (b < 0) continue;
       s.vis = true;
       counts[b]++;
+      any = true;
     }
+    if (!any) return;
     let acc = 0;
     for (let b = 0; b < counts.length; b++) {
       this.bucketStart[b] = acc;
       acc += counts[b];
     }
-    const fill = this.bucketCount;
-    fill.fill(0);
+    counts.fill(0);
     for (let i = 0; i < n; i++) {
       const s = strands[i];
-      if (!s.vis) continue;
+      if (s.web !== web || !s.vis) continue;
       const b = s.bucket;
-      this.order[this.bucketStart[b] + fill[b]++] = i;
+      this.order[this.bucketStart[b] + counts[b]++] = i;
     }
-
-    // Pass 1 and 2: a soft dark line under a fine light one.
+    const pal = web.palette;
+    const ox = PASS_OFFSET[pal][0];
+    const oy = PASS_OFFSET[pal][1];
     for (let pass = 0; pass < 2; pass++) {
-      for (let b = 0; b < fill.length; b++) {
-        const count = fill[b];
+      if (!PASS_ON[pal][pass]) continue;
+      if (pass === 0 && (ox || oy)) ctx.translate(ox, oy);
+      for (let b = 0; b < LEVELS * 2; b++) {
+        const count = counts[b];
         if (!count) continue;
         const level = (b % LEVELS) + 1;
-        const cls = Math.floor(b / LEVELS) % 2;
-        const pal = Math.floor(b / (LEVELS * 2));
-        if (pass === 0 && pal === 2) continue; // a dark shadow on a dark page shows nothing
+        const cls = b < LEVELS ? 0 : 1;
         ctx.strokeStyle = strokeStyles[pal][pass][cls][level];
-        ctx.lineWidth = pass ? CORE_WIDTH[cls] : SHADOW_WIDTH[cls];
+        ctx.lineWidth = PASS_WIDTH[pal][pass][cls];
         ctx.beginPath();
         const start = this.bucketStart[b];
         for (let k = 0; k < count; k++) this.trace(ctx, strands[this.order[start + k]]);
         ctx.stroke();
       }
+      if (pass === 0 && (ox || oy)) ctx.translate(-ox, -oy);
     }
-
-    if (!this.reduced) this.drawLight(ctx);
-    this.drawDew(ctx);
-
-    for (const sp of this.spiders) sp.draw(ctx, sp.web.palette === 0);
+    if (!this.reduced) this.drawLight(ctx, web);
+    this.drawDew(ctx, web);
   }
 
   private bucket(s: Strand): number {
@@ -1505,7 +1834,7 @@ export class Cobwebs {
     const level = Math.round(clamp(alpha, 0, 1) * LEVELS);
     if (level <= 0) return -1;
     const cls = s.kind === RADIAL || s.kind === FRAME || s.kind === DRAG ? 0 : 1;
-    return (s.web.palette * 2 + cls) * LEVELS + level - 1;
+    return cls * LEVELS + level - 1;
   }
 
   private trace(ctx: CanvasRenderingContext2D, s: Strand): void {
@@ -1525,7 +1854,7 @@ export class Cobwebs {
    * flashes, with a rainbow sheen around the spot. The light drifts slowly,
    * and as threads sway the glints slide along them.
    */
-  private drawLight(ctx: CanvasRenderingContext2D): void {
+  private drawLight(ctx: CanvasRenderingContext2D, web: Web): void {
     const t = this.simTime;
     const phi = 0.85 + 0.55 * Math.sin(t * 0.00009);
     const lx = Math.cos(phi);
@@ -1539,7 +1868,7 @@ export class Cobwebs {
     const strands = this.strands;
     for (let i = 0; i < strands.length && g < MAX_GLINTS; i++) {
       const s = strands[i];
-      if (!s.vis || s.kind === TAIL) continue;
+      if (s.web !== web || !s.vis || s.kind === TAIL) continue;
       const pLx = (s.qx - s.ax) * lx + (s.qy - s.ay) * ly;
       const qLx = (s.bx - s.qx) * lx + (s.by - s.qy) * ly;
       if (pLx * qLx >= 0) continue;
@@ -1547,6 +1876,7 @@ export class Cobwebs {
       if (u < 0.04 || u > 0.96) continue;
       if (s.f < 1 && (s.rev ? u < 1 - s.f : u > s.f)) continue;
       const q = curvePoint(s, u);
+      if (q.x < -10 || q.y < -10 || q.x > vw + 10 || q.y > vh + 10) continue;
       const pool = Math.exp(-((q.x - cx) ** 2 + (q.y - cy) ** 2) / sigma2);
       const shimmer = 0.85 + 0.15 * Math.sin(t * 0.004 + s.phase * 40);
       const intensity = (0.15 + 0.85 * pool) * s.weight * Math.min(s.a.alpha, s.b.alpha) * shimmer;
@@ -1556,6 +1886,8 @@ export class Cobwebs {
       this.glintI[g] = intensity;
       g++;
     }
+    const pal = web.palette;
+    const light = pal === 0;
     // Sheen: a short iridescent stretch of thread around each glint.
     ctx.lineWidth = 1.1;
     for (let k = 0; k < g; k++) {
@@ -1563,45 +1895,36 @@ export class Cobwebs {
       const u = this.glintU[k];
       const len = Math.hypot(s.bx - s.ax, s.by - s.ay) || 1;
       const du = clamp(9 / len, 0.05, 0.35);
-      const hue = Math.floor(((s.web.hue + u * 0.3 + s.phase * 0.25 + (s.ax + s.ay) * 0.0012 + t * 0.00003) % 1) * HUES) % HUES;
+      const hue = hueIndex(web.hue + u * 0.3 + s.phase * 0.25 + (s.ax + s.ay) * 0.0012 + t * 0.00003);
       const level = Math.round(clamp(this.glintI[k], 0, 1) * LEVELS);
       if (!level) continue;
-      ctx.strokeStyle = sheenStyles[s.web.palette][hue][level];
+      ctx.strokeStyle = sheenStyles[pal][hue][level];
       ctx.beginPath();
       tracePart(ctx, s, Math.max(0, u - du), Math.min(1, u + du));
       ctx.stroke();
     }
-    // Glints and the sparks of snapping threads.
-    for (const lighter of [true, false]) {
-      ctx.globalCompositeOperation = lighter ? 'lighter' : 'source-over';
-      for (let k = 0; k < g; k++) {
-        const s = strands[this.glintS[k]];
-        if ((s.web.palette !== 0) !== lighter) continue;
-        const i = this.glintI[k];
-        if (i < 0.32) continue;
-        const q = curvePoint(s, this.glintU[k]);
-        const size = 3 + 6 * i;
-        const hue = Math.floor((s.web.hue + s.phase) * HUES) % HUES;
-        ctx.globalAlpha = Math.min(1, i * (lighter ? 0.95 : 0.7));
-        ctx.drawImage(glintSprite(hue), q.x - size / 2, q.y - size / 2, size, size);
-      }
-      for (const sp of this.sparks) {
-        if ((sp.palette !== 0) !== lighter) continue;
-        const k = sp.life / 14;
-        const size = 4 + 10 * k;
-        ctx.globalAlpha = k * 0.9;
-        ctx.drawImage(glintSprite(Math.floor(sp.x + sp.y) % HUES), sp.x - size / 2, sp.y - size / 2, size, size);
-      }
+    // Glints: additive on dark pages; a dark-rimmed sparkle on light ones.
+    ctx.globalCompositeOperation = light ? 'source-over' : 'lighter';
+    for (let k = 0; k < g; k++) {
+      const i = this.glintI[k];
+      if (i < 0.32) continue;
+      const s = strands[this.glintS[k]];
+      const q = curvePoint(s, this.glintU[k]);
+      const size = 3 + 6 * i;
+      ctx.globalAlpha = Math.min(1, i * (light ? 0.75 : 0.95));
+      ctx.drawImage(glintSprite(Math.floor((web.hue + s.phase) * HUES), light), q.x - size / 2, q.y - size / 2, size, size);
     }
     ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = 'source-over';
   }
 
-  private drawDew(ctx: CanvasRenderingContext2D): void {
-    const sprite = dewSprite();
+  private drawDew(ctx: CanvasRenderingContext2D, web: Web): void {
+    const sprite = dewSprite(web.palette === 0);
+    const vw = innerWidth;
+    const vh = innerHeight;
     for (const d of this.dews) {
       const s = d.s;
-      if (s.dead || !s.vis) continue;
+      if (s.web !== web || s.dead || !s.vis) continue;
       if (s.f < 1 && (s.rev ? d.u < 1 - s.f : d.u > s.f)) continue;
       if (!d.placed) {
         const q = curvePoint(s, d.u);
@@ -1609,7 +1932,8 @@ export class Cobwebs {
         d.y = q.y + d.r * 0.55;
         d.placed = true;
       }
-      const alpha = Math.min(s.a.alpha, s.b.alpha) * (s.web.fadeIn && s.web.weaving ? clamp(s.web.clock / s.web.weaveMs, 0, 1) : 1);
+      if (d.x < -8 || d.y < -8 || d.x > vw + 8 || d.y > vh + 8) continue;
+      const alpha = Math.min(s.a.alpha, s.b.alpha) * (web.fadeIn && web.weaving ? clamp(web.clock / web.weaveMs, 0, 1) : 1);
       if (alpha <= 0.02) continue;
       // Squash and stretch with the wobble.
       const v = clamp(Math.hypot(d.vx, d.vy) * 0.25, 0, 0.35);
@@ -1618,6 +1942,25 @@ export class Cobwebs {
       ctx.globalAlpha = alpha;
       ctx.drawImage(sprite, d.x - 1.6 * sx, d.y - 1.6 * sy, 3.2 * sx, 3.2 * sy);
     }
+    ctx.globalAlpha = 1;
+  }
+
+  /** Sparks of snapping threads and drops falling from broken ones. */
+  private drawLoose(ctx: CanvasRenderingContext2D): void {
+    if (!this.sparks.length && !this.drips.length) return;
+    for (let pass = 0; pass < 2; pass++) {
+      const light = pass === 0;
+      ctx.globalCompositeOperation = light ? 'source-over' : 'lighter';
+      for (const sp of this.sparks) {
+        if ((sp.palette === 0) !== light) continue;
+        const k = sp.life / 14;
+        const size = 4 + 10 * k;
+        ctx.globalAlpha = k * 0.9;
+        ctx.drawImage(glintSprite(Math.floor(sp.x + sp.y), light), sp.x - size / 2, sp.y - size / 2, size, size);
+      }
+    }
+    ctx.globalCompositeOperation = 'source-over';
+    const sprite = dewSprite(true);
     for (const r of this.drips) {
       ctx.globalAlpha = clamp(1 - r.vy / 14, 0.2, 1);
       ctx.drawImage(sprite, r.x - 1.6 * r.r, r.y - 1.6 * r.r * 1.2, 3.2 * r.r, 3.2 * r.r * 1.2);
@@ -1630,9 +1973,12 @@ export class Cobwebs {
     this.raf = 0;
     if (this.idleTimer !== undefined) clearTimeout(this.idleTimer);
     this.idleTimer = undefined;
+    if (this.sweepTimer !== undefined) clearTimeout(this.sweepTimer);
+    this.sweepTimer = undefined;
+    if (this.growTimer === undefined) this.unlisten();
     this.host?.remove();
-    this.host = this.canvas = null;
-    this.ctx = null;
+    this.host = this.canvas = this.base = null;
+    this.ctx = this.baseCtx = null;
     this.particles = [];
     this.strands = [];
     this.webs = [];
@@ -1641,6 +1987,7 @@ export class Cobwebs {
     this.drips = [];
     this.sparks = [];
     this.breaks = [];
+    this.inBase.clear();
     this.falling = this.tails = 0;
     dropSprites();
     dropSpiderSprites();

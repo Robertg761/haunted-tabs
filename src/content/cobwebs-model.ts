@@ -39,6 +39,9 @@ export interface Particle {
   rk: number;
   /** Per-point phase so the breeze does not move everything in lockstep. */
   phase: number;
+  /** Where it was when its web was last drawn, to tell whether it needs drawing again. */
+  rx: number;
+  ry: number;
 }
 
 export interface Strand {
@@ -118,6 +121,22 @@ export interface Web {
   hue: number;
   /** Points still belonging to it, refreshed by the connectivity pass. */
   points: number;
+  /** Where it was hung and how big, for keeping webs apart. */
+  cx: number;
+  cy: number;
+  R: number;
+  /** Something about it changed since it was last drawn. */
+  stir: boolean;
+  /** Frames it has stayed still; once calm it is drawn once into `layer` and reused. */
+  calm: number;
+  layer: HTMLCanvasElement | null;
+  layerOk: boolean;
+  lx: number;
+  ly: number;
+  lw: number;
+  lh: number;
+  /** simTime when it last lost its spider (or never had one), for one to move back in. */
+  vacantSince: number;
 }
 
 export const rand = (min: number, max: number): number => min + Math.random() * (max - min);

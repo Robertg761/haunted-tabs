@@ -71,7 +71,7 @@ const TUCK = [
 const SPINNERET = -9.9;
 const STEP = 1000 / 60;
 
-let bodySprite: HTMLCanvasElement | null = null;
+const bodySprites: (HTMLCanvasElement | null)[] = [null, null];
 let shadowSprite: HTMLCanvasElement | null = null;
 
 export class Spider {
@@ -219,6 +219,25 @@ export class Spider {
     const end = best[best.length - 1];
     way.push(this.exitFrom(end.x, end.y, end.x - this.x, end.y - this.y));
     this.walk(way, 4.4, 'gone');
+  }
+
+  /** Climb in from beyond the window along a radial (outermost point first) to the hub, and settle. */
+  enter(radial: Particle[], hub: Particle): void {
+    const end = radial[radial.length - 1];
+    const from = this.exitFrom(end.x, end.y, end.x - hub.x, end.y - hub.y);
+    this.x = this.lastX = from.x;
+    this.y = this.lastY = from.y;
+    this.angle = this.targetAngle = Math.atan2(hub.y - end.y, hub.x - end.x);
+    this.alpha = 0.3;
+    const way: Way[] = [];
+    for (let i = radial.length - 1; i >= 0; i--) way.push(this.way(radial[i]));
+    way.push(this.way(hub));
+    for (const l of this.legs) {
+      this.restWorld(l);
+      l.fx = rw.x;
+      l.fy = rw.y;
+    }
+    this.walk(way, 2.2, 'sit');
   }
 
   /** Let go of the web on a silk line, fall, bounce, dangle, then climb back. */
@@ -588,11 +607,17 @@ export class Spider {
 
   // --- drawing ---------------------------------------------------------------
 
-  draw(ctx: CanvasRenderingContext2D, light: boolean): void {
+  /**
+   * `palette` is the page under its web: 0 light, 1 mid, 2 dark. On darker
+   * pages a near-black spider would vanish, so it gets a pale rim light.
+   */
+  draw(ctx: CanvasRenderingContext2D, palette: number): void {
     if (this.alpha <= 0.01 || this.state === 'gone') return;
+    const light = palette === 0;
     ctx.save();
     ctx.globalAlpha = this.alpha;
     const sc = this.scale;
+    const sq = this.squash();
 
     if (this.state === 'drop' && this.anchor) {
       this.local(SPINNERET, 0);
@@ -602,11 +627,11 @@ export class Spider {
       ctx.beginPath();
       ctx.moveTo(ax, ay);
       ctx.lineTo(rw.x, rw.y);
-      ctx.strokeStyle = 'rgba(16,18,26,0.3)';
+      ctx.strokeStyle = light ? 'rgba(10,12,22,0.16)' : 'rgba(16,18,26,0.3)';
       ctx.lineWidth = 1.3;
       ctx.stroke();
-      ctx.strokeStyle = 'rgba(238,241,250,0.75)';
-      ctx.lineWidth = 0.6;
+      ctx.strokeStyle = light ? 'rgba(118,122,136,0.8)' : 'rgba(238,241,250,0.75)';
+      ctx.lineWidth = light ? 0.9 : 0.6;
       ctx.stroke();
     }
 
@@ -615,21 +640,17 @@ export class Spider {
       ctx.save();
       ctx.translate(this.x + 2.5 * sc, this.y + 4 * sc);
       ctx.rotate(this.angle);
-      ctx.scale(sc, sc * this.squash());
+      ctx.scale(sc, sc * sq);
       ctx.globalAlpha = this.alpha * 0.5;
       ctx.drawImage(getShadow(), -16, -12, 30, 24);
       ctx.restore();
     }
 
-    // Legs: femur, tibia, tarsus, each finer than the last, with a faint rim
-    // of light so they read on dark pages too.
-    const femurs = new Path2D();
-    const tibias = new Path2D();
-    const tarsi = new Path2D();
-    const knees: number[] = [];
+    // Legs: hip, knee, ankle, foot for each, worked out once into `joints`.
     const c = Math.cos(this.angle);
     const s = Math.sin(this.angle);
-    for (const l of this.legs) {
+    for (let n = 0; n < this.legs.length; n++) {
+      const l = this.legs[n];
       this.local(HIP[l.i][0], HIP[l.i][1] * l.side);
       const hx = rw.x;
       const hy = rw.y;
@@ -649,47 +670,37 @@ export class Spider {
       let nx = -dy / d;
       let ny = dx / d;
       // Knees bend away from the body.
-      const ox = -s * l.side;
-      const oy = c * l.side;
-      if (nx * ox + ny * oy < 0) {
+      if (nx * -s * l.side + ny * c * l.side < 0) {
         nx = -nx;
         ny = -ny;
       }
-      const sq = this.squash();
       const kx = hx + (dx / d) * a + nx * h * sq;
       const ky = hy + (dy / d) * a + ny * h * sq;
-      const ankX = kx + (fx - kx) * 0.74 + nx * 0.7 * sc;
-      const ankY = ky + (fy - ky) * 0.74 + ny * 0.7 * sc;
-      femurs.moveTo(hx, hy);
-      femurs.lineTo(kx, ky);
-      tibias.moveTo(kx, ky);
-      tibias.lineTo(ankX, ankY);
-      tarsi.moveTo(ankX, ankY);
-      tarsi.lineTo(fx, fy);
-      knees.push(kx, ky);
+      const j = n * 8;
+      joints[j] = hx;
+      joints[j + 1] = hy;
+      joints[j + 2] = kx;
+      joints[j + 3] = ky;
+      joints[j + 4] = kx + (fx - kx) * 0.74 + nx * 0.7 * sc;
+      joints[j + 5] = ky + (fy - ky) * 0.74 + ny * 0.7 * sc;
+      joints[j + 6] = fx;
+      joints[j + 7] = fy;
     }
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
-    ctx.strokeStyle = 'rgba(230,225,235,0.22)';
-    ctx.lineWidth = 2.1 * sc;
-    ctx.stroke(femurs);
-    ctx.lineWidth = 1.7 * sc;
-    ctx.stroke(tibias);
-    ctx.lineWidth = 1.3 * sc;
-    ctx.stroke(tarsi);
-    ctx.strokeStyle = '#0c0a0d';
-    ctx.lineWidth = 1.35 * sc;
-    ctx.stroke(femurs);
-    ctx.strokeStyle = '#120f12';
-    ctx.lineWidth = 1.0 * sc;
-    ctx.stroke(tibias);
-    ctx.strokeStyle = '#1a1519';
-    ctx.lineWidth = 0.65 * sc;
-    ctx.stroke(tarsi);
-    ctx.fillStyle = '#3a2e30';
-    for (let i = 0; i < knees.length; i += 2) {
+    // Rim light first (strong on dark pages, a whisper on white), then the legs.
+    const rim = light ? 'rgba(230,225,235,0.22)' : 'rgba(214,208,222,0.5)';
+    const extra = light ? 0 : 0.5;
+    this.strokeLegs(ctx, 0, rim, (2.1 + extra) * sc);
+    this.strokeLegs(ctx, 1, rim, (1.7 + extra) * sc);
+    this.strokeLegs(ctx, 2, rim, (1.3 + extra) * sc);
+    this.strokeLegs(ctx, 0, '#0c0a0d', 1.35 * sc);
+    this.strokeLegs(ctx, 1, '#120f12', 1.0 * sc);
+    this.strokeLegs(ctx, 2, '#1a1519', 0.65 * sc);
+    ctx.fillStyle = light ? '#3a2e30' : '#5a4a4e';
+    for (let n = 0; n < this.legs.length; n++) {
       ctx.beginPath();
-      ctx.arc(knees[i], knees[i + 1], 0.75 * sc, 0, Math.PI * 2);
+      ctx.arc(joints[n * 8 + 2], joints[n * 8 + 3], 0.75 * sc, 0, Math.PI * 2);
       ctx.fill();
     }
 
@@ -698,17 +709,17 @@ export class Spider {
     const bob = this.state === 'walk' ? Math.sin(this.gait) * 0.25 : 0;
     ctx.translate(this.x, this.y);
     ctx.rotate(this.angle);
-    ctx.scale(sc, sc * this.squash());
+    ctx.scale(sc, sc * sq);
     ctx.translate(bob, 0);
     ctx.save();
     ctx.translate(-0.6, 0);
     ctx.scale(breathe, breathe);
     ctx.translate(0.6, 0);
-    ctx.drawImage(getBody(), -11.5, -5.5, 21, 11);
+    ctx.drawImage(getBody(!light), -11.5, -5.5, 21, 11);
     ctx.restore();
-    ctx.strokeStyle = '#140f12';
+    ctx.strokeStyle = light ? '#140f12' : '#3a3034';
     ctx.lineWidth = 0.75;
-    for (const side of [-1, 1]) {
+    for (let side = -1; side <= 1; side += 2) {
       const p = this.palp * 0.35 * side;
       ctx.beginPath();
       ctx.moveTo(6.0, 1.0 * side);
@@ -719,23 +730,41 @@ export class Spider {
       ctx.stroke();
     }
     // Two eyes that catch the light, a dull red.
-    const glow = 0.55 + 0.35 * Math.sin(this.t * 0.0023);
-    ctx.fillStyle = `rgba(255, 46, 36, ${glow.toFixed(3)})`;
-    for (const side of [-1, 1]) {
+    ctx.fillStyle = EYES[Math.round((0.5 + 0.5 * Math.sin(this.t * 0.0023)) * (EYES.length - 1))];
+    for (let side = -1; side <= 1; side += 2) {
       ctx.beginPath();
       ctx.arc(5.85, 0.55 * side, 0.42, 0, Math.PI * 2);
       ctx.fill();
     }
     ctx.restore();
   }
+
+  /** Stroke one segment (0 femur, 1 tibia, 2 tarsus) of all eight legs in one path. */
+  private strokeLegs(ctx: CanvasRenderingContext2D, seg: number, style: string, width: number): void {
+    ctx.strokeStyle = style;
+    ctx.lineWidth = width;
+    ctx.beginPath();
+    for (let n = 0; n < this.legs.length; n++) {
+      const j = n * 8 + seg * 2;
+      ctx.moveTo(joints[j], joints[j + 1]);
+      ctx.lineTo(joints[j + 2], joints[j + 3]);
+    }
+    ctx.stroke();
+  }
 }
+
+/** Leg joints for the spider being drawn: 8 legs x (hip, knee, ankle, foot). */
+const joints = new Float64Array(64);
+/** The eyes' slow glow, as ready-made colours. */
+const EYES = Array.from({ length: 9 }, (_, i) => `rgba(255, 46, 36, ${(0.2 + (i / 8) * 0.7).toFixed(3)})`);
 
 /** Scratch point for `local`, so the per-frame maths allocates nothing. */
 const rw = { x: 0, y: 0 };
 
 /** Abdomen, cephalothorax, eyes and mouthparts, pre-rendered in detail at 8px per unit. */
-function getBody(): HTMLCanvasElement {
-  if (bodySprite) return bodySprite;
+function getBody(dark: boolean): HTMLCanvasElement {
+  const cached = bodySprites[dark ? 1 : 0];
+  if (cached) return cached;
   const k = 8;
   const c = document.createElement('canvas');
   c.width = 21 * k;
@@ -857,7 +886,24 @@ function getBody(): HTMLCanvasElement {
       g.fill();
     }
   }
-  bodySprite = c;
+  if (dark) {
+    // On dark pages: a pale rim of light round abdomen and head so it reads.
+    g.strokeStyle = 'rgba(222,214,228,0.55)';
+    g.lineWidth = 0.3;
+    ellipse(-4.7, 0, 5.25, 4.05);
+    g.stroke();
+    ellipse(3.2, 0, 3.25, 2.55);
+    g.stroke();
+    g.globalCompositeOperation = 'lighter';
+    const tint = g.createRadialGradient(-3.4, -1.3, 0.3, -4.7, 0, 5.6);
+    tint.addColorStop(0, 'rgba(70,58,62,0.55)');
+    tint.addColorStop(1, 'rgba(30,24,26,0.2)');
+    g.fillStyle = tint;
+    ellipse(-4.7, 0, 5.2, 4.0);
+    g.fill();
+    g.globalCompositeOperation = 'source-over';
+  }
+  bodySprites[dark ? 1 : 0] = c;
   return c;
 }
 
@@ -881,6 +927,6 @@ function getShadow(): HTMLCanvasElement {
 }
 
 export function dropSpiderSprites(): void {
-  bodySprite = null;
+  bodySprites[0] = bodySprites[1] = null;
   shadowSprite = null;
 }
