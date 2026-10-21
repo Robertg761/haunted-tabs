@@ -264,7 +264,7 @@ canvas.spirits.running { display: block; }
 }
 .summary {
   margin: 10px auto 0;
-  max-width: 54ch;
+  max-width: 64ch;
   color: var(--muted);
   min-height: 3em;
   font-size: clamp(15px, 1.6vw, 17px);
@@ -667,7 +667,8 @@ canvas.spirits.running { display: block; }
 .stone:hover .body, .stone:has(:focus-visible) .body, .stone:focus-visible .body { transform: translateY(-4px); }
 .stone:hover .fav, .stone:has(:focus-visible) .fav, .stone:focus-visible .fav { filter: none; opacity: 1; }
 .stone:has(:focus-visible) .name, .stone:focus-visible .name { -webkit-line-clamp: 8; }
-@media (hover: none) { .name { -webkit-line-clamp: 8; } }
+/* Without hover the stone cannot grow on demand; a fourth line, and the title attribute, carry the rest. */
+@media (hover: none) { .name { -webkit-line-clamp: 4; } }
 .stone:hover .flame, .stone:has(:focus-visible) .flame, .stone:focus-visible .flame, .candle.lit .flame {
   opacity: 1;
   scale: 1;
@@ -783,6 +784,8 @@ canvas.spirits.running { display: block; }
 .empty-plot { position: relative; width: 190px; margin: 0 auto; }
 .empty-plot .grave { width: 100%; }
 .blank .inscription { min-height: 230px; }
+/* Nothing to search or raise in an empty yard. */
+.controls[hidden] { display: none; }
 .shovel { position: absolute; z-index: 2; right: -58px; bottom: 10px; width: 48px; rotate: 18deg; filter: drop-shadow(1px 0 0 rgba(180, 185, 225, 0.45)); }
 .blank .slab { filter: brightness(0.8); }
 .blank .inscription::before {
@@ -823,7 +826,7 @@ canvas.spirits.running { display: block; }
 .compact .rule { margin: 6px 0 5px; }
 .compact .epitaph { font-size: 11.5px; }
 /* The hour of death is left to screen readers when space is short. */
-.compact .died { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.compact .died { font-size: 10.5px; line-height: 1.3; opacity: 0.9; }
 .compact .cause { margin-top: 1px; }
 .compact .actions { margin-top: 8px; }
 .compact .btn.raise { padding: 5px 11px 5px 9px; font-size: 13px; }
@@ -836,6 +839,11 @@ canvas.spirits.running { display: block; }
   .yard { gap: 40px 20px; }
   .yard.compact { gap: 30px 14px; }
   .moon { top: 12px; right: 12px; width: 40px; }
+  /* A smaller empty stone, so the words below it stay above the fold. */
+  .empty-plot { width: 132px; }
+  .blank .inscription { min-height: 150px; }
+  .shovel { right: -44px; width: 36px; }
+  .empty-title { margin-top: 18px; }
   .cloud { display: none; }
 }
 

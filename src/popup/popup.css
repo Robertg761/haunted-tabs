@@ -424,13 +424,16 @@ body[data-level='4'] .meter-glow { animation: throb 1.4s ease-in-out infinite; }
 .intro h2 { margin: 1px 0 2px; font: 600 15px/1.25 var(--serif); color: #f7f2ff; }
 .intro p { margin: 0; font-size: 12px; color: var(--text-2); }
 .intro em { font-style: normal; color: var(--ghost); text-shadow: 0 0 10px rgba(166, 247, 211, 0.45); }
-.intro-steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin: 10px 0 8px; padding: 0; list-style: none; }
+/* Each chip starts at its own width and shares out the rest, so the longest label never touches its border. */
+.intro-steps { display: flex; gap: 6px; margin: 10px 0 8px; padding: 0; list-style: none; }
 .intro-steps li {
   display: flex;
   align-items: center;
   justify-content: center;
+  flex: 1 1 auto;
   gap: 6px;
   height: 30px;
+  padding: 0 10px;
   border-radius: 9px;
   background: rgba(7, 5, 12, 0.45);
   border: 1px solid var(--line);
@@ -969,7 +972,7 @@ body.dormant .fav .ring,
   transition: border-color 0.2s, box-shadow 0.2s;
 }
 /* Once the settings scroll, the head gets an edge so rows do not vanish into nothing. */
-.sheet.scrolled .sheet-head { border-bottom-color: var(--line); box-shadow: 0 10px 14px -12px rgba(0, 0, 0, 0.9); }
+.sheet.scrolled .sheet-head { border-bottom-color: var(--line-2); box-shadow: 0 12px 18px -8px rgba(0, 0, 0, 0.75); }
 .sheet-head h2 { margin: 0; font: 600 19px/1.2 var(--serif); color: #f7f2ff; }
 .ghost-btn {
   width: 32px;
