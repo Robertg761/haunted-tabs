@@ -176,7 +176,18 @@ try {
   check(await alpha.evaluate(() => !document.querySelector('[data-haunted-tabs="glitch"]')), 'glitch overlay cleaned up');
   const webs = () => alpha.evaluate(() => Number(document.querySelector('[data-haunted-tabs="cobwebs"]')?.dataset.webs ?? 0));
   check((await webs()) >= 4, `a long-dead tab is full of cobwebs (${await webs()})`);
+  const effectsOn = () => alpha.evaluate(() => [...document.querySelectorAll('[data-haunted-tabs^="effect-"]')].map((e) => e.getAttribute('data-haunted-tabs')).sort());
+  const greeted = await eventually(async () => (await effectsOn()).length >= 3 && (await effectsOn()), 3000);
+  check(
+    JSON.stringify(greeted) === JSON.stringify(['effect-dust', 'effect-eyes', 'effect-fog']),
+    `a dead tab is greeted by dust, fog and eyes (${greeted})`,
+  );
   if (shots) await alpha.screenshot({ path: join(shots, 'cobwebs.png') });
+  // Switching one effect off fades it out of the open page and leaves the rest running.
+  await ask({ type: 'setSettings', settings: { fog: false } });
+  const unfogged = await eventually(async () => !(await effectsOn()).includes('effect-fog') && (await effectsOn()), 4000);
+  check(JSON.stringify(unfogged) === JSON.stringify(['effect-dust', 'effect-eyes']), `turning fog off clears it from the page (${unfogged})`);
+  await ask({ type: 'setSettings', settings: { fog: true } });
   for (let i = 0; i < 8; i++) {
     await alpha.mouse.move(980, 620, { steps: 14 });
     await alpha.mouse.move(20, 20, { steps: 14 });
@@ -265,6 +276,10 @@ try {
   check(
     await eventually(() => alpha.evaluate(() => !document.querySelector('[data-haunted-tabs="cobwebs"]')), 4000),
     'exorcise sweeps away the cobwebs',
+  );
+  check(
+    await eventually(() => alpha.evaluate(() => !document.querySelector('[data-haunted-tabs^="effect-"]')), 5000),
+    'exorcise clears every page effect',
   );
   const badge = await sw.evaluate(() => chrome.action.getBadgeText({}));
   check(badge === '', 'badge cleared');

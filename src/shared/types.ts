@@ -7,6 +7,9 @@ export enum Stage {
   Entombed = 4,
 }
 
+/** Page effects beyond cobwebs, each in src/content/effects/<name>.ts. */
+export type EffectName = 'dust' | 'fog' | 'eyes' | 'drips' | 'shadow' | 'ghostCursor';
+
 export interface Settings {
   /** Master switch. Off until the user opts in from the popup. */
   enabled: boolean;
@@ -20,6 +23,18 @@ export interface Settings {
   whispers: boolean;
   /** Neglected pages gather cobwebs that scrolling or sweeping the mouse tears away. */
   cobwebs: boolean;
+  /** Withering pages yellow, grain over and gather drifting dust. */
+  dust: boolean;
+  /** Ghost tabs fog over like cold glass; the mouse wipes it clear. */
+  fog: boolean;
+  /** Dead tabs: a pair of eyes watches from an empty corner of the page. */
+  eyes: boolean;
+  /** Entombed tabs: dark drips run down from the top of the page. */
+  drips: boolean;
+  /** Poltergeist: a shadow passes behind the page while you read. */
+  shadow: boolean;
+  /** Poltergeist: a second cursor follows yours, then wanders off. */
+  ghostCursor: boolean;
   /** Discard ghost tabs to free memory. */
   autoDiscard: boolean;
   /** Close entombed tabs and move them to the Graveyard. */
@@ -33,6 +48,12 @@ export const DEFAULT_SETTINGS: Settings = {
   poltergeist: true,
   whispers: false,
   cobwebs: true,
+  dust: true,
+  fog: true,
+  eyes: true,
+  drips: true,
+  shadow: true,
+  ghostCursor: true,
   autoDiscard: false,
   autoBury: false,
 };
@@ -53,6 +74,10 @@ export interface TabRecord {
   needsExorcise?: boolean;
   /** Cobweb growth is running in the current page. */
   cobwebsArmed?: boolean;
+  /** Page effects may be running in the current page. */
+  effectsArmed?: boolean;
+  /** Effects switched off while the page could not answer; retried until it does. */
+  pendingStop?: EffectName[];
   /** A return visit to replay once a tab the browser unloaded has reloaded. */
   pendingReturn?: { stage: Stage; idle: number; at: number; url?: string };
   /** The visit that just played, in case the page reloads straight after. */
@@ -126,6 +151,11 @@ export type PageCommand =
   | { type: 'haunt:dirty' }
   /** Lay `webs` cobwebs now, and keep weaving more after `growAfterMs` without activity. */
   | { type: 'haunt:cobwebs'; webs: number; growAfterMs: number }
+  /** Start page effects for a tab at `stage`. */
+  | { type: 'haunt:effects'; effects: EffectName[]; stage: Stage; idleMs: number; seed: number }
+  /** Fade out the named effects (a setting was switched off). */
+  | { type: 'haunt:stopEffects'; effects: EffectName[] }
+  /** Fade out cobwebs and every page effect. */
   | { type: 'haunt:sweep' };
 
 export type PageEvent = { type: 'haunt:realTitle'; title: string };

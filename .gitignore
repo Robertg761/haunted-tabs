@@ -4,3 +4,4 @@ dist-test/
 *.zip
 test-results/
 .cache/
+shots/

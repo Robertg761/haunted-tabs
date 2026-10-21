@@ -13,6 +13,7 @@ import {
 import { loadGraves, loadSettings, saveGraves, saveSettings } from '../shared/storage';
 import {
   Stage,
+  type EffectName,
   type Grave,
   type HauntLevel,
   type PageCommand,
@@ -29,7 +30,10 @@ import { ext } from '../shared/ext';
 const TICK_ALARM = 'haunt-tick';
 const SESSION_KEY = 'hauntState';
 const ALL_URLS = { origins: ['<all_urls>'] };
-const GLITCH_MS = 1100;
+/** Long enough to read the message: 1.1 s, plus 25 ms per character over 16, up to 1.8 s. */
+function glitchMs(message: string): number {
+  return Math.min(1800, 1100 + 25 * Math.max(0, Array.from(message).length - 16));
+}
 
 interface SessionState {
   records: Record<number, TabRecord>;
@@ -207,7 +211,11 @@ async function restoreTab(tabId: number, rec: TabRecord | undefined, sweep = fal
   rec.applied = Stage.Alive;
   rec.appliedTitle = undefined;
   rec.needsExorcise = false;
-  if (sweep) rec.cobwebsArmed = false;
+  if (sweep) {
+    rec.cobwebsArmed = false;
+    rec.effectsArmed = false;
+    rec.pendingStop = undefined;
+  }
 }
 
 /** Paint a tab to match its stage of decay. */
@@ -328,7 +336,14 @@ async function tick(): Promise<void> {
         const rec = state.records[tab.id!];
         const stage = stages.get(tab.id!);
         if (!rec || stage === undefined) return;
+        // A tab pinned or playing sound while its page could not answer still wears webs or effects.
+        if (rec.needsExorcise && isProtected(tab) && !isAsleep(tab)) await restoreTab(tab.id!, rec, true);
         await paint(tab, rec, stage, now);
+        if (rec.pendingStop && !isAsleep(tab)) {
+          const effects = rec.pendingStop.filter((name) => unwantedEffects().includes(name));
+          const res = effects.length ? await send<{ ok: boolean }>(tab.id!, { type: 'haunt:stopEffects', effects }, false) : { ok: true };
+          if (res?.ok) rec.pendingStop = undefined;
+        }
         if (tab.active && settings.cobwebs && !rec.cobwebsArmed && !isProtected(tab) && !isAsleep(tab) && tab.status === 'complete') {
           // Even the tab you are on gathers webs if you stop touching it.
           const res = await send<{ ok: boolean }>(tab.id!, { type: 'haunt:cobwebs', webs: 0, growAfterMs: growAfterMs() }, true);
@@ -360,6 +375,8 @@ async function tick(): Promise<void> {
         rec.applied = Stage.Alive;
         rec.appliedTitle = undefined;
         rec.cobwebsArmed = false;
+        rec.effectsArmed = false;
+        rec.pendingStop = undefined;
         rec.needsExorcise = false;
       }),
     );
@@ -403,9 +420,28 @@ async function maybePoltergeist(tabs: chrome.tabs.Tab[], stages: Map<number, Sta
       const [active] = await ext.tabs.query({ active: true, lastFocusedWindow: true });
       if (!active?.id || isProtected(active)) return false;
       const message = poltergeistMessage(realTitle, rec.seed + now);
-      const res = await send<{ ok: boolean }>(active.id, { type: 'haunt:glitch', message, thenRestore: false, durationMs: GLITCH_MS }, true);
+      const res = await send<{ ok: boolean }>(active.id, { type: 'haunt:glitch', message, thenRestore: false, durationMs: glitchMs(message) }, true);
       return !!res?.ok;
     });
+  }
+  if (settings.poltergeist && (stages.get(victim.id!) ?? 0) >= Stage.Dead) {
+    // The dead reach into the tab you are on: a passing shadow, or a second cursor.
+    for (const name of POLTERGEIST_EFFECTS) {
+      if (!settings[name]) continue;
+      events.push(async () => {
+        // Only on a page in front of you, and not straight after it greeted you with its own haunting.
+        const win = await ext.windows.getLastFocused().catch(() => undefined);
+        if (!win?.focused || win.state === 'minimized') return false;
+        const [active] = await ext.tabs.query({ active: true, windowId: win.id });
+        if (!active?.id || isProtected(active) || isAsleep(active)) return false;
+        const host = state.records[active.id];
+        if (host?.lastReturn && now - host.lastReturn.at < 2 * 60_000) return false;
+        const cmd: PageCommand = { type: 'haunt:effects', effects: [name], stage: Stage.Dead, idleMs: now - rec.lastSeen, seed: rec.seed };
+        const res = await send<{ ok: boolean }>(active.id, cmd, true);
+        if (res?.ok && host) host.effectsArmed = true;
+        return !!res?.ok;
+      });
+    }
   }
   if (settings.whispers && (await ext.permissions.contains({ permissions: ['notifications'] }))) {
     events.push(async () => {
@@ -430,6 +466,22 @@ const WEBS_BY_STAGE: Record<Stage, number> = {
   [Stage.Dead]: 5,
   [Stage.Entombed]: 7,
 };
+/** Page effects that greet you on return, and the stage each one starts at. */
+const STAGE_EFFECTS: [EffectName, Stage][] = [
+  ['dust', Stage.Withering],
+  ['fog', Stage.Ghost],
+  ['eyes', Stage.Dead],
+  ['drips', Stage.Entombed],
+];
+/** Effects only a poltergeist plays, on the tab you are using. */
+const POLTERGEIST_EFFECTS: EffectName[] = ['shadow', 'ghostCursor'];
+const ALL_EFFECTS: EffectName[] = [...STAGE_EFFECTS.map(([name]) => name), ...POLTERGEIST_EFFECTS];
+
+/** Effects the current settings no longer allow. */
+function unwantedEffects(): EffectName[] {
+  return ALL_EFFECTS.filter((name) => !settings.enabled || !settings[name] || (!settings.poltergeist && POLTERGEIST_EFFECTS.includes(name)));
+}
+
 /** How long a return visit waits for a reloading tab before it is dropped. */
 const RETURN_TTL = 2 * 60_000;
 
@@ -459,7 +511,7 @@ async function wake(tabId: number, windowId: number): Promise<void> {
       if (!tab || tab.discarded || tab.status !== 'complete') {
         rec.applied = Stage.Alive; // the old page and our paint are going away
         rec.appliedTitle = undefined;
-      } else if (rec.applied !== Stage.Alive || rec.cobwebsArmed) {
+      } else if (rec.applied !== Stage.Alive || rec.cobwebsArmed || rec.effectsArmed) {
         rec.needsExorcise = !settings.enabled || rec.needsExorcise;
         if (rec.needsExorcise) await ensureAlarm();
       }
@@ -482,11 +534,8 @@ async function returnVisit(tab: chrome.tabs.Tab, rec: TabRecord, stage: Stage, i
       const title = paintedTitle(tab, rec, stage, Date.now());
       await send(tabId, { type: 'haunt:apply', title, icon: await iconFor(stage as Exclude<Stage, Stage.Alive>, tab.url ?? '', rec.realFavIconUrl) }, true);
     }
-    const res = await send<{ ok: boolean }>(
-      tabId,
-      { type: 'haunt:glitch', message: possessionMessage(idle, rec.seed), thenRestore: true, durationMs: GLITCH_MS },
-      false,
-    );
+    const message = possessionMessage(idle, rec.seed);
+    const res = await send<{ ok: boolean }>(tabId, { type: 'haunt:glitch', message, thenRestore: true, durationMs: glitchMs(message) }, false);
     delivered = !!res?.ok;
   } else {
     // Always ask: cheap when there is nothing to restore, and it catches paint
@@ -503,6 +552,18 @@ async function returnVisit(tab: chrome.tabs.Tab, rec: TabRecord, stage: Stage, i
     const res = await send<{ ok: boolean }>(tabId, { type: 'haunt:cobwebs', webs: WEBS_BY_STAGE[stage], growAfterMs: growAfterMs() }, true);
     if (res?.ok) rec.cobwebsArmed = true;
     delivered = !!res?.ok;
+  }
+  const effects = settings.enabled ? STAGE_EFFECTS.filter(([name, from]) => settings[name] && stage >= from).map(([name]) => name) : [];
+  if (effects.length) {
+    const res = await send<{ ok: boolean }>(tabId, { type: 'haunt:effects', effects, stage, idleMs: idle, seed: rec.seed }, true);
+    if (res?.ok) rec.effectsArmed = true;
+    delivered &&= !!res?.ok;
+  }
+  // The page may have been frozen when an effect was switched off. Stop it now.
+  const unwanted = unwantedEffects();
+  if (rec.effectsArmed && unwanted.length) {
+    const res = await send<{ ok: boolean }>(tabId, { type: 'haunt:stopEffects', effects: unwanted }, false);
+    if (res?.ok) rec.pendingStop = undefined;
   }
   if (delivered) {
     rec.pendingReturn = undefined;
@@ -543,12 +604,14 @@ async function exorcise(): Promise<void> {
         if (rec.applied !== Stage.Alive) await ext.tabs.reload(tab.id).catch(() => {});
       } else if ((await tryClean(tab.id, { restore: true, sweep: true })) === 'frozen') {
         // Frozen pages cannot answer yet. Keep them marked; tick keeps asking.
-        if (rec.applied !== Stage.Alive || rec.cobwebsArmed) rec.needsExorcise = true;
+        if (rec.applied !== Stage.Alive || rec.cobwebsArmed || rec.effectsArmed) rec.needsExorcise = true;
         return;
       }
       rec.applied = Stage.Alive;
       rec.appliedTitle = undefined;
       rec.cobwebsArmed = false;
+      rec.effectsArmed = false;
+      rec.pendingStop = undefined;
       rec.needsExorcise = false;
     }),
   );
@@ -567,6 +630,18 @@ async function setSettings(patch: Partial<Settings>): Promise<void> {
   }
   settings = { ...settings, ...patch };
   await saveSettings(settings);
+  const switchedOff = ALL_EFFECTS.filter((name) => patch[name] === false || (patch.poltergeist === false && POLTERGEIST_EFFECTS.includes(name)));
+  if (switchedOff.length) {
+    const tabs = await ext.tabs.query({});
+    await Promise.all(
+      tabs.map(async (t) => {
+        const res = await send<{ ok: boolean }>(t.id!, { type: 'haunt:stopEffects', effects: switchedOff }, false);
+        const rec = state.records[t.id!];
+        // A busy or frozen page missed it: tick asks again once the page answers.
+        if (!res?.ok && rec?.effectsArmed) rec.pendingStop = [...new Set([...(rec.pendingStop ?? []), ...switchedOff])];
+      }),
+    );
+  }
   if (patch.cobwebs === false) {
     const tabs = await ext.tabs.query({});
     await Promise.all(
@@ -713,6 +788,8 @@ ext.tabs.onUpdated.addListener((tabId, info, tab) => {
       rec.applied = Stage.Alive;
       rec.appliedTitle = undefined;
       rec.cobwebsArmed = false;
+      rec.effectsArmed = false;
+      rec.pendingStop = undefined;
       rec.needsExorcise = false;
       // Firefox wakes an unloaded tab as a placeholder first and only then really
       // reloads it, wiping a visit that has only just played. Play it again.

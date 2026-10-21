@@ -37,3 +37,4 @@ This repo is a solo entry for [Hackyard Yard #5](https://hackyard.tech/yards/yar
 Add each AI model or tool used during the build here, so the declaration is easy to write.
 
 - Claude Opus 5.5 (via Claude Code): initial extension build (tab manager popup, decay stages, possession glitch, poltergeists, Graveyard, tests), then Firefox/Zen support, cobwebs, and memory-saver handling
+- Claude Opus 5.5 (via Claude Code, as a team of parallel subagents with a coordinator): page effects (dust and decay, fogged glass, eyes in the dark, drips, the shadow behind the text, the ghost cursor), the reworked possession glitch, cobweb polish, the popup and Graveyard redesigns, and the review and refinement passes on all of them
