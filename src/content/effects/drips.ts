@@ -20,7 +20,7 @@
 // resolution inside the dirty tiles. Nothing outside our own overlay is touched.
 
 import type { Effect, EffectContext } from './types';
-import { createOverlay, seeded, type Overlay } from './overlay';
+import { areasTaken, claimAreas, createOverlay, seeded, type Area, type Overlay } from './overlay';
 
 /** Field cells per CSS pixel. */
 const FS = 0.5;
@@ -60,6 +60,12 @@ const WIPE_GESTURE = 0.9;
 /** Probe grid for text: column width and vertical step, in CSS px. */
 const PROBE_BIN = 12;
 const PROBE_STEP = 24;
+/** A column clear all the way down. */
+const NO_STOP = 1e6;
+/** A head stops this far above the first text (or another creature) below it. */
+const STOP_GAP = 30;
+/** The least room a drip needs: a bead hanging under the meniscus. */
+const MIN_RUN = 36;
 /** Frame rate while only slow things change (trails drying, the film seeping in, the band settling). */
 const CALM_FPS = 15;
 /** Seconds for a drip stranded over text by a resize to evaporate. */
@@ -120,6 +126,10 @@ interface Drip {
   /** 1 while present; falls to 0 as a drip left over text by a resize evaporates. */
   gone: number;
   doomed: boolean;
+  /** How far down the head may go (its bottom, CSS px) before text or another creature; NO_STOP for all the way. */
+  stopY: number;
+  /** A thin drip down the very edge of the window, where text does not count. */
+  edge: boolean;
 }
 
 interface Bit {
@@ -142,37 +152,38 @@ const hash = (i: number) => {
 };
 
 // The look, shared by the shader and its CPU twin (shadeTiles, keep them in step).
-// Colours are [light page, dark page]: on dark pages the body is lifted and the
-// rim light is stronger so the shape still reads.
+// Colours are [light page, dark page]. Old blood, not paint: oxblood thinning to a
+// rusty brown where it dries. On dark pages the body is lifted and less saturated,
+// and the rim light is stronger, so the shape still reads without turning candy red.
 const LOOK = {
   bump: 3.0,
   half: [-0.5, -0.35, 1.0],
   fill: [0.3, 0.6, 1.0],
   thin: [
-    [0.38, 0.0, 0.03],
-    [0.52, 0.03, 0.055],
+    [0.34, 0.035, 0.03],
+    [0.4, 0.1, 0.08],
   ],
   thick: [
-    [0.12, 0.0, 0.016],
-    [0.21, 0.012, 0.026],
+    [0.12, 0.012, 0.01],
+    [0.19, 0.055, 0.045],
   ],
   edge: [
-    [0.035, 0.0, 0.006],
-    [0.12, 0.006, 0.014],
+    [0.04, 0.006, 0.005],
+    [0.11, 0.035, 0.03],
   ],
   dry: [
-    [0.2, 0.045, 0.03],
-    [0.32, 0.07, 0.05],
+    [0.21, 0.075, 0.045],
+    [0.29, 0.12, 0.08],
   ],
   glow: [
-    [0.5, 0.035, 0.055],
-    [0.6, 0.07, 0.09],
+    [0.42, 0.06, 0.035],
+    [0.42, 0.12, 0.08],
   ],
   rim: [
-    [0.5, 0.1, 0.11],
-    [0.6, 0.15, 0.17],
+    [0.42, 0.12, 0.09],
+    [0.46, 0.2, 0.16],
   ],
-  rimK: [0.1, 0.5],
+  rimK: [0.1, 0.42],
   shadowK: [0.16, 0.06],
 };
 type Col = 'thin' | 'thick' | 'edge' | 'dry' | 'glow' | 'rim';
@@ -381,8 +392,13 @@ export class Drips implements Effect {
   private S = 1;
 
   // Text probe (runs in idle time) and the drips waiting for it.
-  private veto: Uint8Array | null = null;
-  private scanRaw: Uint8Array | null = null;
+  /** Per probe column: how far down it is clear before text or a control (NO_STOP if all the way). */
+  private reach: Float32Array | null = null;
+  private scanRaw: Float32Array | null = null;
+  /** Sim time of the next look at what other creatures have claimed. */
+  private nextAreaCheck = 0;
+  /** The page scrolled gently since the columns were last probed. */
+  private moved = false;
   private scanB = 0;
   private idle = 0;
   private idleIsTimeout = false;
@@ -411,7 +427,10 @@ export class Drips implements Effect {
       }
       this.wetTarget = 1;
       const more = Math.min(3, MAX_DRIPS - this.drips.length);
-      if (this.veto) this.addDrips(more, this.t + 0.8, 7);
+      if (this.reach) {
+        this.addDrips(more, this.t + 0.8, 7);
+        this.claim();
+      }
       else this.wantDrips = Math.min(MAX_DRIPS, this.wantDrips + more);
       this.wake();
       return;
@@ -432,8 +451,9 @@ export class Drips implements Effect {
     this.W = this.H = 0;
     this.poolBase = new Float32Array(0);
     this.drips = [];
-    this.veto = null;
-    this.recheck = false;
+    this.reach = null;
+    this.recheck = this.moved = false;
+    this.nextAreaCheck = 0;
     this.measure();
     this.t = 0;
     this.opacity = 0;
@@ -494,6 +514,7 @@ export class Drips implements Effect {
     this.scheme?.removeEventListener('change', this.onTheme);
     this.scheme = null;
     this.cancelScan();
+    claimAreas('drips', []);
     if (this.raf) cancelAnimationFrame(this.raf);
     this.raf = 0;
     document.removeEventListener('scroll', this.onScroll, { capture: true });
@@ -671,8 +692,8 @@ export class Drips implements Effect {
         }
       }
       // Columns were measured for the old layout: probe again, and let any drip now over text go.
-      if (this.veto && Math.abs(oldW - W) > PROBE_BIN) {
-        this.veto = null;
+      if (this.reach && Math.abs(oldW - W) > PROBE_BIN) {
+        this.reach = null;
         this.recheck = true;
         if (!this.idle) {
           this.scanRaw = null;
@@ -730,40 +751,55 @@ export class Drips implements Effect {
     }
     const bins = Math.max(1, Math.ceil(this.W / PROBE_BIN));
     if (!this.scanRaw || this.scanRaw.length !== bins) {
-      this.scanRaw = new Uint8Array(bins);
+      this.scanRaw = new Float32Array(bins);
       this.scanB = 0;
     }
     const budget = dl && !dl.didTimeout ? Math.min(8, Math.max(3, dl.timeRemaining())) : 5;
     const until = performance.now() + budget;
     const probe = this.textProbe();
-    while (this.scanB < bins && performance.now() < until) this.scanRaw[this.scanB] = probe(this.scanB++) ? 1 : 0;
+    while (this.scanB < bins && performance.now() < until) this.scanRaw[this.scanB] = probe(this.scanB++);
     probe(-1);
     if (this.scanB < bins) {
       this.scheduleScan();
       return;
     }
-    this.veto = this.dilate(this.scanRaw);
+    this.reach = this.spread(this.scanRaw);
     let span = 17.5;
     if (this.recheck) {
-      // After a resize: drips stranded over text evaporate, and as many new ones form in clear columns.
+      // The layout moved under the drips (a resize, or the page scrolled): drips now running
+      // over text or into something else's space evaporate, and as many form in clear columns.
       this.recheck = false;
       span = 6;
       for (const d of this.drips) {
-        if (d.doomed || d.x0 < 12 || d.x0 > this.W - 12) continue;
-        if (this.veto[Math.min(this.veto.length - 1, Math.max(0, Math.floor(d.x0 / PROBE_BIN)))]) {
+        if (d.doomed) continue;
+        const stop = this.stopAt(d.x0, d.edge, d.wobA);
+        if (d.phase !== WAITING && stop < this.extent(d) - 4) {
           d.doomed = true;
           if (!this.stopping && !this.wiping) this.wantDrips++;
-        }
+        } else d.stopY = stop;
       }
     }
     const want = Math.min(MAX_DRIPS - this.drips.filter((d) => !d.doomed).length, this.wantDrips);
     this.wantDrips = 0;
     this.addDrips(want, Math.max(1.3, this.t + 0.3), span);
+    this.claim();
     this.wake();
   };
 
-  /** A column prober: probe(bin) is true when that column holds text or controls anywhere. probe(-1) releases it. */
-  private textProbe(): (b: number) => boolean {
+  /** Probe the columns again (keeping the old answer until the new one is in). */
+  private requestRecheck(): void {
+    this.recheck = true;
+    if (!this.idle) {
+      this.scanRaw = null;
+      this.scheduleScan();
+    }
+  }
+
+  /**
+   * A column prober: probe(bin) is how far down (CSS px) that column is clear before the
+   * first text or control, or NO_STOP when it is clear all the way. probe(-1) releases it.
+   */
+  private textProbe(): (b: number) => number {
     const W = this.W;
     const H = this.H;
     const doc = document as Document & {
@@ -795,66 +831,142 @@ export class Drips implements Effect {
       return false;
     };
     const controls = /^(INPUT|TEXTAREA|SELECT|BUTTON|VIDEO|IFRAME)$/;
+    // Links and buttons dressed up as anything (a pill, a card), unless they are huge wrappers.
+    const clickable = 'a[href], button, [role="button"], label, summary';
+    const small = W * H * 0.15;
+    const isControl = (el: Element | null): boolean => {
+      if (!el) return false;
+      if (controls.test(el.tagName)) return true;
+      const c = el.closest(clickable);
+      if (!c) return false;
+      const r = c.getBoundingClientRect();
+      return r.width * r.height < small;
+    };
     return (b: number) => {
       if (b < 0) {
         range.detach();
-        return false;
+        return NO_STOP;
       }
       const x = Math.min(W - 1, b * PROBE_BIN + PROBE_BIN / 2);
       try {
         for (let y = 8; y < H; y += PROBE_STEP) {
-          if (textAt(x, y)) return true;
-          const el = document.elementFromPoint(x, y);
-          if (el && controls.test(el.tagName)) return true;
+          if (textAt(x, y)) return y;
+          if (isControl(document.elementFromPoint(x, y))) return y;
         }
       } catch {
-        return true;
+        return 0;
       }
-      return false;
+      return NO_STOP;
     };
   }
 
-  /** Any column with text is out, and so are its neighbours (a head is ~20 px wide). */
-  private dilate(raw: Uint8Array): Uint8Array {
-    const out = new Uint8Array(raw.length);
+  /** A column is only as clear as its neighbours (a head is ~20 px wide). */
+  private spread(raw: Float32Array): Float32Array {
+    const out = new Float32Array(raw.length);
     for (let b = 0; b < raw.length; b++) {
-      if (!raw[b]) continue;
-      for (let k = -2; k <= 2; k++) if (b + k >= 0 && b + k < raw.length) out[b + k] = 1;
+      let v = raw[b];
+      for (let k = -2; k <= 2; k++) if (b + k >= 0 && b + k < raw.length && raw[b + k] < v) v = raw[b + k];
+      out[b] = v;
     }
     return out;
   }
 
   /**
-   * Where the drips run: only in columns with no text from top to bottom,
-   * preferring the window edges. When the page has (almost) no such columns,
-   * a few thin drips hug the outer margins instead. Later drips may follow an
-   * earlier one down the same channel. Returns their x positions.
+   * How far down a drip at x may run, measured to the bottom of its head: to just above the
+   * first text or control in its column (unless it is a thin drip down the window edge), and
+   * never into the space another creature has claimed (the eyes' darkness, a web).
+   */
+  private stopAt(x: number, edge: boolean, wob = 3): number {
+    let stop = NO_STOP;
+    if (!edge && this.reach) stop = this.reach[Math.min(this.reach.length - 1, Math.max(0, Math.floor(x / PROBE_BIN)))] - STOP_GAP;
+    const half = wob + 14;
+    for (const a of areasTaken('drips')) {
+      if (x + half < a.x || x - half > a.x + a.w || a.y + a.h < 0 || a.y > this.H) continue;
+      stop = Math.min(stop, a.y - STOP_GAP);
+    }
+    return stop;
+  }
+
+  /** The lowest point of a drip so far (its trail or its head), in CSS px. */
+  private extent(d: Drip): number {
+    let y = d.n ? d.trail[(d.n - 1) * 4 + 1] + d.trail[(d.n - 1) * 4 + 2] : 0;
+    if (d.m > 1 && d.phase !== WAITING) y = Math.max(y, d.y + Math.sqrt(d.m / Math.PI) * 1.1);
+    return y;
+  }
+
+  /** Tell the other creatures which columns the drips run down, so they keep out of them. */
+  private claim(): void {
+    const areas: Area[] = [];
+    for (const d of this.drips) {
+      if (d.doomed) continue;
+      const half = d.wobA + 14;
+      areas.push({ x: d.x0 - half, y: 0, w: half * 2, h: Math.min(this.H, d.stopY + STOP_GAP) });
+    }
+    claimAreas('drips', areas);
+  }
+
+  /**
+   * Something else settled in a drip's way since it was planned (eyes open, a web is spun):
+   * a drip it lands on evaporates, and one that has not reached it yet stops short of it.
+   */
+  private checkAreas(): void {
+    const taken = areasTaken('drips');
+    if (!taken.length) return;
+    let changed = false;
+    for (const d of this.drips) {
+      if (d.doomed || d.phase === WAITING) continue;
+      const half = d.wobA + 14;
+      const bottom = this.extent(d);
+      for (const a of taken) {
+        if (d.x0 + half < a.x || d.x0 - half > a.x + a.w || a.y + a.h < 0 || a.y - STOP_GAP >= d.stopY) continue;
+        changed = true;
+        if (a.y - STOP_GAP < bottom) {
+          d.doomed = true;
+          break;
+        }
+        d.stopY = a.y - STOP_GAP;
+      }
+    }
+    if (changed) this.claim();
+  }
+
+  /**
+   * Where the drips run: down columns that are clear for a good way (all the way to the
+   * pool is best), preferring the window edges. A column with text further down still
+   * takes a drip: it runs until just above the text and hangs there. When the page has
+   * (almost) no room at all, a few thin drips hug the outer margins instead. Later drips
+   * may follow an earlier one down a long channel. Returns their x positions.
    */
   pickColumns(count: number): number[] {
-    if (!this.veto) {
+    if (!this.reach) {
       const bins = Math.max(1, Math.ceil(this.W / PROBE_BIN));
-      const raw = new Uint8Array(bins);
+      const raw = new Float32Array(bins);
       const probe = this.textProbe();
-      for (let b = 0; b < bins; b++) raw[b] = probe(b) ? 1 : 0;
+      for (let b = 0; b < bins; b++) raw[b] = probe(b);
       probe(-1);
-      this.veto = this.dilate(raw);
+      this.reach = this.spread(raw);
     }
     const W = this.W;
-    const veto = this.veto;
+    const H = this.H;
     const rng = this.rng;
-    // Clear stretches of columns, kept off the very edge of the window.
+    const bins = this.reach.length;
+    // How far a drip could run down each column, other creatures included.
+    const run = new Float32Array(bins);
+    for (let b = 0; b < bins; b++) run[b] = this.stopAt(b * PROBE_BIN + PROBE_BIN / 2, false);
+    // Stretches of columns with room for at least a hanging bead, kept off the very edge of the window.
     const slots: number[] = [];
     // Room for a drip every ~24 px (heads are ~20 px wide, and neighbours start at different times).
     const minGap = Math.max(24, Math.min(36, W / 48));
     const taken = this.drips.filter((d) => !d.doomed).map((d) => d.x0);
     let b = 0;
-    while (b < veto.length) {
-      if (veto[b]) {
+    while (b < bins) {
+      if (run[b] < MIN_RUN) {
         b++;
         continue;
       }
       const s = b;
-      while (b < veto.length && !veto[b]) b++;
+      // A stretch ends where the room changes a lot, so each slot's run is about what it gets.
+      while (b < bins && run[b] >= MIN_RUN && Math.abs(Math.min(run[b], H) - Math.min(run[s], H)) < 60) b++;
       const x0 = Math.max(14, s * PROBE_BIN + 4);
       const x1 = Math.min(W - 14, b * PROBE_BIN - 4);
       if (x1 < x0) continue;
@@ -862,14 +974,19 @@ export class Drips implements Effect {
       const step = n > 1 ? (x1 - x0) / (n - 1) : 0;
       for (let i = 0; i < n; i++) slots.push(n > 1 ? x0 + step * i : (x0 + x1) / 2);
     }
+    const runAt = (x: number) => Math.min(H, run[Math.min(bins - 1, Math.max(0, Math.floor(x / PROBE_BIN)))]);
     const xs: number[] = [];
     if (slots.length < 2) {
-      // Wall-to-wall text: a few thin drips down the outer margins only.
+      // Wall-to-wall text: a few thin drips down the outer margins only, if nothing else is there.
       const n = Math.min(count, 3 + (rng() < 0.5 ? 1 : 0));
-      for (let i = 0; i < n; i++) xs.push(i % 2 === 0 ? 3 + rng() * 3 : W - 3 - rng() * 3);
+      for (let i = 0; i < n; i++) {
+        const x = i % 2 === 0 ? 3 + rng() * 3 : W - 3 - rng() * 3;
+        if (this.stopAt(x, true, 0.4) >= MIN_RUN) xs.push(x);
+      }
     } else {
-      // Prefer the slots near the window edges, and ones not used yet.
-      const weight = (x: number) => 0.4 + Math.pow(Math.max(0, 1 - Math.min(x, W - x) / (W * 0.25)), 1.2);
+      // Prefer long runs, slots near the window edges, and ones not used yet.
+      const weight = (x: number) =>
+        (0.4 + Math.pow(Math.max(0, 1 - Math.min(x, W - x) / (W * 0.25)), 1.2)) * (0.25 + 0.75 * Math.min(1, runAt(x) / (H * 0.6)));
       const pool = slots.filter((x) => taken.every((t) => Math.abs(t - x) >= minGap * 0.6));
       const order: number[] = [];
       while (pool.length) {
@@ -880,11 +997,15 @@ export class Drips implements Effect {
         while (i < pool.length - 1 && pick > weight(pool[i])) pick -= weight(pool[i++]);
         order.push(pool.splice(i, 1)[0]);
       }
-      // Fill fresh slots first; then send later drips down channels already used.
+      // Fill fresh slots first; then send later drips down long channels already used (a
+      // second head stopping where the first one hangs would only swell it into a blob).
       // Few channels: fewer drips, so a gutter bleeds rather than floods.
       const n = Math.min(count, Math.max(3, Math.ceil(slots.length * 1.7)));
-      const reuse = order.length ? order : slots.slice();
-      for (let i = 0; i < n; i++) xs.push(i < order.length ? order[i] : reuse[i % reuse.length]);
+      const long = (order.length ? order : slots).filter((x) => runAt(x) >= H * 0.6);
+      for (let i = 0; i < n; i++) {
+        if (i < order.length) xs.push(order[i]);
+        else if (long.length) xs.push(long[i % long.length]);
+      }
     }
     return xs;
   }
@@ -900,7 +1021,9 @@ export class Drips implements Effect {
     for (let i = 0; i < xs.length; i++) {
       const x = xs[i];
       const thin = x < 12 || x > W - 12;
-      const k = this.sizeK * (thin ? 0.55 : 1);
+      const stopY = this.stopAt(x, thin, thin ? 0.4 : 3);
+      // A drip with only a short way to go is a smaller bead.
+      const k = this.sizeK * (thin ? 0.55 : 1) * (0.7 + 0.3 * Math.min(1, stopY / 220));
       const r0 = (8 + rng() * 4) * k;
       const pins: number[] = [];
       const pinK: number[] = [];
@@ -952,6 +1075,8 @@ export class Drips implements Effect {
         stuck: 0,
         gone: 1,
         doomed: false,
+        stopY,
+        edge: thin,
       });
     }
     let end = 0;
@@ -1171,6 +1296,10 @@ export class Drips implements Effect {
       if (Math.abs(d.waver) > 0.03) lively = true;
     }
     if (gone) this.drips = this.drips.filter((d) => d.gone > 0);
+    if (t >= this.nextAreaCheck && !frozen) {
+      this.nextAreaCheck = t + 0.5;
+      this.checkAreas();
+    }
     if (t < this.stirUntil) lively = true;
     if (live || t < this.endT) busy = true;
 
@@ -1195,8 +1324,14 @@ export class Drips implements Effect {
     if (!s) {
       // Calm again: the liquid gathers itself back.
       if (now - this.gestureAt > 400) this.wetTarget += (1 - this.wetTarget) * (1 - Math.exp(-dt / 3));
+      // The page under the glass has moved: see which drips now run over text.
+      if (this.moved && now - this.gestureAt > 500) {
+        this.moved = false;
+        this.requestRecheck();
+      }
       return;
     }
+    this.moved = true;
     let sum = 0;
     for (let i = 0; i < 32; i++) if (now - this.velT[i] < 150) sum += this.velD[i];
     const speed = sum / 0.15;
@@ -1219,7 +1354,9 @@ export class Drips implements Effect {
       const kick = g * (0.65 + 0.35 * hash(k + 1));
       if (kick > 0) {
         // Dragged down: the head smears on, stretching its trail behind it.
-        d.y = Math.min(this.H - 4, d.y + kick);
+        // (Never past what it stopped above.)
+        const lim = Math.min(this.H - 4, d.stopY - Math.sqrt(Math.max(0, d.m) / Math.PI) * 1.1);
+        d.y = Math.max(d.y, Math.min(lim, d.y + kick));
         for (let i = 1; i < d.n; i++) d.trail[i * 4 + 1] += kick * 0.85 * (i / d.n) * (i / d.n);
         if (d.phase === RUNNING) d.v = Math.max(d.v, (kick / Math.max(dt, 1 / 60)) * 0.15);
         this.deposit(d, true);
@@ -1261,6 +1398,13 @@ export class Drips implements Effect {
       // The meniscus already sags a little where a drip is about to form.
       d.bump = d.rRelease * 0.3 * smooth(d.at - 4, d.at, t);
       if (t >= d.at) {
+        // Look again at what lies below: another creature may have settled there since.
+        d.stopY = this.stopAt(d.x0, d.edge, d.wobA);
+        if (d.stopY < MIN_RUN) {
+          d.doomed = true;
+          this.claim();
+          return;
+        }
         d.phase = GATHERING;
         d.x = d.x0 + d.wobA * Math.sin(d.wobP);
         d.lastX = d.x;
@@ -1318,7 +1462,13 @@ export class Drips implements Effect {
     mc = Math.min(mc, mMax * 0.9);
     const ex = d.m - mc;
     const vmax = (this.reduced ? 34 : 150) * this.S;
-    const vt = ex > 0 ? vmax * Math.pow(Math.min(1, ex / (mc * 0.9)), 1.4) : 0;
+    let vt = ex > 0 ? vmax * Math.pow(Math.min(1, ex / (mc * 0.9)), 1.4) : 0;
+    // Text or another creature below: the head slows as it nears it and hangs just above.
+    const room = d.stopY - (d.y + rv * 1.1);
+    if (room < 40) {
+      vt *= Math.max(0, room / 40);
+      if (room < 2) d.feed = 0;
+    }
     const rate = vt > d.v ? 1.7 : 7;
     d.v += (vt - d.v) * (1 - Math.exp(-dt * rate));
     // Where surface tension held the head for a while, a little bead stays behind.
@@ -1336,11 +1486,11 @@ export class Drips implements Effect {
     this.deposit(d, false);
 
     // Now and then a heavy, fast head lets go of a drop.
-    if (!this.reduced && d.detach && d.v > vmax * 0.55 && d.m > mc * 1.4 && this.rng() < d.detach * dt) {
+    if (!this.reduced && d.detach && d.stopY >= this.H && d.v > vmax * 0.55 && d.m > mc * 1.4 && this.rng() < d.detach * dt) {
       const md = d.m * (0.38 + this.rng() * 0.12);
       if (this.spawnDrop(d.x, d.y + rv * 0.6, d.v * 1.15, md)) d.m -= md;
     }
-    if (d.y + rv * 0.6 >= this.H - this.poolAt(d.x)) {
+    if (d.stopY >= this.H && d.y + rv * 0.6 >= this.H - this.poolAt(d.x)) {
       d.phase = POOLING;
       d.v = 0;
       this.ripple(d.x, 3 * this.S);

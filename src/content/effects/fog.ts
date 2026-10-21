@@ -15,7 +15,7 @@
 // lifts. The animation sleeps whenever nothing is changing and while the tab is hidden.
 
 import type { Effect, EffectContext } from './types';
-import { createOverlay, OUR_ATTR, seeded, type Overlay } from './overlay';
+import { areasTaken, claimAreas, createOverlay, OUR_ATTR, seeded, type Overlay } from './overlay';
 import {
   buildHand, buildWord, clamp01, coarseField, dropSprite, featherMask, fogTextureJob, Noise, smoothstep,
   type Grid, type Imprint, type Palette, type Rand,
@@ -342,6 +342,7 @@ export class Fog implements Effect {
     this.texJob = null;
     this.maskImg = this.rimImg = null;
     this.app = null;
+    claimAreas('fog', []);
     this.bloomMap = this.Tfrom = this.Tto = this.busy = null;
     this.stopping = false;
     this.bLive.fill(0);
@@ -394,6 +395,7 @@ export class Fog implements Effect {
     this.wet = new Float32Array(n);
     this.bloomMap = this.Tfrom = this.Tto = null;
     this.app = null;
+    claimAreas('fog', []);
     // Until the new targets are worked out (in short slices), stand in with the old ones or nothing.
     this.T = new Float32Array(n);
     this.order = new Float32Array(n).fill(1);
@@ -1417,6 +1419,7 @@ export class Fog implements Effect {
     const vh = this.vh;
     const m = 20;
     if (hw * 2 + m * 2 > vw || hh * 2 + m * 2 > vh) return null;
+    const taken = areasTaken('fog');
     const cands: [number, number, number][] = [];
     for (let j = 0; j < 5; j++) {
       for (let i = 0; i < 7; i++) {
@@ -1425,6 +1428,8 @@ export class Fog implements Effect {
         let fog = 0;
         for (let k = 0; k < 5; k++) fog += this.fogAt(x + hw * (k / 2 - 1) * 0.8, y + hh * ((k % 3) - 1) * 0.6);
         const away = Math.min(1, (120 + Math.hypot(x - this.p1x, y - this.p1y)) / 600);
+        // Never where another creature has settled (the eyes' darkness, a web, a drip's run).
+        if (taken.some((a) => x + hw > a.x && x - hw < a.x + a.w && y + hh > a.y && y - hh < a.y + a.h)) continue;
         cands.push([x, y, (fog / 5) * (0.5 + 0.5 * away) * (0.85 + 0.3 * this.rand())]);
       }
     }
@@ -1474,6 +1479,7 @@ export class Fog implements Effect {
       for (let i = 2; i < imp.beads.length; i += 4) imp.beads[i] = 1 + (i % 7) * 0.2;
     }
     this.app = imp;
+    claimAreas('fog', [{ x: imp.cx - imp.rx, y: imp.cy - imp.ry, w: imp.rx * 2, h: imp.ry * 2 }]);
     this.appT = 0;
     this.appBead = 0;
     this.appDrip = 0;
@@ -1545,6 +1551,7 @@ export class Fog implements Effect {
     if (this.appT > this.appRelease + 12.5) {
       this.app = null;
       this.bloomMap = null;
+      claimAreas('fog', []);
     }
   }
 }
