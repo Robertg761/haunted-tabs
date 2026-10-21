@@ -1,62 +1,78 @@
 // Possession: about a second in which something takes over the real page.
 // Plays when you return to a dead tab, and when a poltergeist reaches into the
-// tab you are on. Everything it adds is removed when it ends, and it leaves no
-// style behind on the page.
+// tab you are on. Everything it adds is removed when it ends, and it never
+// touches the page's own elements or styles.
 //
-// In Chromium the page itself is pulled apart through SVG backdrop filters: its
-// colour channels drift apart, slices of it are thrown sideways and swing back
-// with weight, blocks of it crush into macroblocks, and a tracking band rolls
-// down it. If the machine cannot keep up, the full-screen split gives way to a
-// plain darkening after the first few frames. Other engines get the same scene
-// built from CSS backdrop filters.
+// In Chromium the page itself is pulled apart through SVG backdrop filters: red
+// drifts off cyan, slices of it are thrown sideways and swing back with weight,
+// blocks of it crush into macroblocks, and a tracking band rolls down it. If the
+// machine cannot keep up, it drops to the CSS version mid-flight. Other engines
+// get the CSS version from the start.
+//
+// Choreography: the words type themselves in through noise, then hold clean
+// (nothing tears through them but one twitch), then corrupt and collapse into a
+// line as the page lets go.
 //
 // Photosensitive-safe: one bright full-screen frame (a short negative), one
-// darken and lift, and the apparition surfacing once. Nothing strobes. With
-// reduced motion it is only a slow darkening with the message fading in and out.
+// darken and lift, the apparition surfacing once. Nothing strobes. With reduced
+// motion it is only a slow darkening with the message fading in and out.
 
 import { OUR_ATTR, Z, seeded } from './overlay';
-import { channelMatrix, drawApparition, drawGrain, drawSnow, moshFilter, shearFilter, splitFilter } from './possession-art';
+import { APPARITION_CHIN, channelMatrix, drawApparition, drawGrain, drawSnow, moshFilter, shearFilter, splitFilter, svgEl } from './possession-art';
 
-/** The choreography is written for this length; longer runs play it in slow motion. */
-const NOMINAL_S = 1.1;
-const BANDS = 7;
-const BLOCKS = 5;
-const TRACK_SLICES = 4;
-const HITS = [0.02, 0.15, 0.26, 0.37, 0.5, 0.62, 0.74];
+const BANDS = 6;
+const BLOCKS = 4;
+const TRACK_SLICES = 3;
+/** Moments the page is struck. Only TEAR_HIT may reach through the words. */
+const HITS = [0.02, 0.12, 0.22, 0.37, 0.5, 0.63, 0.74];
+const TEAR_HIT = 0.5;
+/** Colour shocks for the CSS version, on these hits. */
+const SHOCKS = [0.12, 0.37, 0.63];
 const MOSH_BURSTS: [number, number][] = [
-  [0.27, 0.35],
-  [0.5, 0.57],
-  [0.71, 0.76],
+  [0.16, 0.24],
+  [0.52, 0.58],
+  [0.79, 0.85],
 ];
+/** The words are whole and still between these. */
+const HOLD_START = 0.28;
+const HOLD_END = 0.78;
 const RELEASE = 0.8;
 const SETTLED = 0.975;
-/** How often glyphs change: about every 30 ms at normal speed. */
-const TICKS = 36;
-/** Frames slower than this (ms, median) drop the full-screen split. */
+const REVEAL_START = 0.06;
+const REVEAL_SPREAD = 0.16;
+const CORRUPT_FOR = 0.05;
+const GONE = 0.885;
+/** Rolling median frame time (ms) above which the SVG version gives way. */
 const SLOW_FRAME_MS = 40;
 const NOISE_GLYPHS = '▓▒░█▚▞▙▟▀▄╳╱╲◢◣◤◥≡ΞЖЯ¥#%&@';
 const NEAR_GLYPHS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+/** Scripts whose letters join or reorder: these are animated word by word, never split. */
+const SHAPED = /[֐-ࣿऀ-෿฀-࿿က-႟ក-᢯ᨀ-᪯ꠀ-꯿יִ-﷿ﹰ-﻿]|[\u{10800}-\u{10FFF}\u{1E900}-\u{1E95F}]/u;
 
 const BASE_CSS = `
 :host { all: initial; }
 .wrap { position: fixed; inset: 0; pointer-events: none; overflow: hidden; z-index: ${Z.possession}; }
 .fill { position: absolute; inset: 0; }
-.dim { opacity: 0; backdrop-filter: brightness(.36) saturate(.45) contrast(1.12); -webkit-backdrop-filter: brightness(.36) saturate(.45) contrast(1.12); }
+.dim { opacity: 0; backdrop-filter: contrast(.72) brightness(.36) saturate(.4); -webkit-backdrop-filter: contrast(.72) brightness(.36) saturate(.4); }
+/* A real tint under the filter: still dark where backdrop-filter draws nothing. */
+.dim.tint { background: rgba(6,3,5,.52); backdrop-filter: contrast(.6) brightness(.7) saturate(.45); -webkit-backdrop-filter: contrast(.6) brightness(.7) saturate(.45); }
 .vignette { opacity: 0; background: radial-gradient(ellipse 80% 75% at 50% 48%, transparent 36%, rgba(10,0,6,.5) 68%, rgba(3,0,2,.94) 100%); }
-.ghost { position: absolute; left: 50%; top: 43%; opacity: 0; transform: translate(-50%, -50%); }
+.ghost { position: absolute; left: 50%; top: 0; opacity: 0; transform: translateX(-50%); }
 .ghost canvas { display: block; width: 100%; height: 100%; }
 .stage { position: absolute; inset: 0; display: grid; place-items: center; padding: 0 6vw; }
-.msg { position: relative; max-width: min(100%, 1180px); text-align: center; color: #f2ece2;
+.msg { position: relative; max-width: min(100%, 1180px); text-align: center; color: #f2ece2; opacity: 0;
   font-family: "Didot", "Bodoni 72", "Bodoni MT", "Playfair Display", "Cormorant Garamond", Georgia, "Times New Roman", "Liberation Serif", serif;
   font-weight: 500; line-height: 1.12; font-size: 64px; text-rendering: geometricPrecision; -webkit-font-smoothing: antialiased; }
 .msg::before { content: ""; position: absolute; inset: -45% -14%; z-index: -1;
-  background: radial-gradient(closest-side, rgba(0,0,0,.62), rgba(0,0,0,.34) 55%, transparent); }
+  background: radial-gradient(closest-side, rgba(0,0,0,.78), rgba(0,0,0,.46) 55%, transparent); }
 .w { display: inline-flex; flex-wrap: wrap; justify-content: center; max-width: 100%; }
-.g { display: inline-block; position: relative; margin: 0 .07em; white-space: pre;
-  text-shadow: -1.5px 0 rgba(255,40,72,.6), 1.5px 0 rgba(0,220,255,.55), 0 0 .5em rgba(255,240,230,.18); }
-.g.h { opacity: 0; }
-.g[data-c] > span { visibility: hidden; }
-.g[data-c]::after { content: attr(data-c); position: absolute; inset: 0; text-align: center; color: #e8f6ff; }
+.g { display: inline-block; position: relative; margin: 0 .07em; white-space: pre; }
+.g, .wd { text-shadow: -1.5px 0 rgba(255,40,72,.6), 1.5px 0 rgba(0,220,255,.55), 0 0 .5em rgba(255,240,230,.18); }
+.wd { letter-spacing: .04em; }
+.h { opacity: 0; }
+.g[data-c] { color: transparent !important; text-shadow: none !important; }
+.g[data-c]::after { content: attr(data-c); position: absolute; inset: 0; text-align: center; color: #e8f6ff;
+  text-shadow: -3px 0 rgba(255,40,72,.8), 3px 0 rgba(0,220,255,.7); }
 `;
 
 const GLITCH_CSS = `
@@ -66,24 +82,30 @@ const GLITCH_CSS = `
 .track > div { position: relative; width: 100%; }
 .track canvas { position: absolute; inset: 0; width: 100%; height: 100%; opacity: .8; }
 .track::after { content: ""; position: absolute; inset: 0;
-  background: linear-gradient(to bottom, rgba(255,255,255,.14) 0, rgba(255,255,255,0) 6%, rgba(255,255,255,0) 90%, rgba(0,0,0,.25) 100%); }
+  background: linear-gradient(to bottom, rgba(255,255,255,.16) 0, rgba(255,255,255,.04) 6%, rgba(255,255,255,.04) 90%, rgba(0,0,0,.25) 100%); }
 .flash { visibility: hidden; backdrop-filter: invert(.9) contrast(1.1) saturate(.5) brightness(.9); -webkit-backdrop-filter: invert(.9) contrast(1.1) saturate(.5) brightness(.9); }
+.shock { visibility: hidden; backdrop-filter: hue-rotate(150deg) saturate(2.4); -webkit-backdrop-filter: hue-rotate(150deg) saturate(2.4); }
 .vignette.scan { background: repeating-linear-gradient(to bottom, rgba(0,0,0,.2) 0 1px, transparent 1px 3px), radial-gradient(ellipse 80% 75% at 50% 48%, transparent 36%, rgba(10,0,6,.5) 68%, rgba(3,0,2,.94) 100%); }
 .grain { position: absolute; left: -3%; top: -3%; width: 106%; height: 106%; opacity: 0; image-rendering: pixelated; }
-/* Without SVG backdrop filters: tinted shards of the page instead of displaced ones. */
-.css .band { box-shadow: -3px 0 rgba(255,40,72,.45), 3px 0 rgba(0,220,255,.4); }
-.css .band.t0 { backdrop-filter: brightness(1.35) contrast(1.3) saturate(2.4) hue-rotate(-25deg); -webkit-backdrop-filter: brightness(1.35) contrast(1.3) saturate(2.4) hue-rotate(-25deg); }
-.css .band.t1 { backdrop-filter: invert(.8) hue-rotate(180deg) contrast(1.15); -webkit-backdrop-filter: invert(.8) hue-rotate(180deg) contrast(1.15); }
-.css .band.t2 { backdrop-filter: blur(1.5px) brightness(1.25) saturate(1.8) hue-rotate(160deg); -webkit-backdrop-filter: blur(1.5px) brightness(1.25) saturate(1.8) hue-rotate(160deg); }
-.css .blk { backdrop-filter: blur(4px) contrast(1.9) saturate(2.2) hue-rotate(70deg); -webkit-backdrop-filter: blur(4px) contrast(1.9) saturate(2.2) hue-rotate(70deg); }
+/* The CSS version: shards of the page shifted in colour and contrast instead of displaced. */
+.css .band.t0 { backdrop-filter: hue-rotate(-35deg) saturate(3.2) brightness(1.08); -webkit-backdrop-filter: hue-rotate(-35deg) saturate(3.2) brightness(1.08); }
+.css .band.t1 { backdrop-filter: blur(2px) hue-rotate(150deg) saturate(2.4); -webkit-backdrop-filter: blur(2px) hue-rotate(150deg) saturate(2.4); }
+.css .band.t2 { backdrop-filter: blur(.6px) sepia(.7) hue-rotate(160deg) saturate(2.6) brightness(1.1); -webkit-backdrop-filter: blur(.6px) sepia(.7) hue-rotate(160deg) saturate(2.6) brightness(1.1); }
+.css .blk { backdrop-filter: blur(3px) hue-rotate(80deg) saturate(3); -webkit-backdrop-filter: blur(3px) hue-rotate(80deg) saturate(3); }
 .css .track { backdrop-filter: blur(.8px) brightness(1.2) contrast(1.15) saturate(1.4); -webkit-backdrop-filter: blur(.8px) brightness(1.2) contrast(1.15) saturate(1.4); }
+.css .track > div { display: none; }
 `;
 
-let glitching = false;
+let running: Promise<void> | null = null;
 let runs = 0;
 
 interface Scene {
   end(): void;
+}
+
+/** Resolves once no possession is running (or waiting for its tab to be shown). */
+export function possessionDone(): Promise<void> {
+  return running ?? Promise.resolve();
 }
 
 /** The tab may still be hidden for a moment right after it is switched to. */
@@ -101,28 +123,29 @@ function whenVisible(timeoutMs: number): Promise<boolean> {
   });
 }
 
-export async function possess(message: string, durationMs: number): Promise<void> {
-  if (glitching || !(await whenVisible(600))) return;
-  glitching = true;
-  const duration = Number.isFinite(durationMs) && durationMs > 0 ? durationMs : 1100;
-  let scene: Scene | null = null;
-  try {
-    // The same message plays the same way on a tab; a repeat varies.
-    const seed = hash(message) + 0x9e3779b9 * runs++;
-    scene = matchMedia('(prefers-reduced-motion: reduce)').matches ? calm(message, duration, seed) : glitch(message, duration, seed);
-  } catch (err) {
-    console.warn('[haunted-tabs] possession', err);
-  }
-  return new Promise((resolve) => {
-    setTimeout(() => {
+export function possess(message: string, durationMs: number): Promise<void> {
+  // One at a time, claimed before waiting, so two arriving while hidden cannot both play.
+  if (running) return Promise.resolve();
+  const run = (async () => {
+    try {
+      if (!(await whenVisible(600))) return;
+      const duration = Number.isFinite(durationMs) && durationMs > 0 ? durationMs : 1100;
+      let scene: Scene | null = null;
       try {
-        scene?.end();
-      } finally {
-        glitching = false;
-        resolve();
+        // The same message plays the same way on a tab; a repeat varies.
+        const seed = hash(message) + 0x9e3779b9 * runs++;
+        scene = matchMedia('(prefers-reduced-motion: reduce)').matches ? calm(message, duration, seed) : glitch(message, duration, seed);
+      } catch (err) {
+        console.warn('[haunted-tabs] possession', err);
       }
-    }, duration);
-  });
+      await new Promise((r) => setTimeout(r, duration));
+      scene?.end();
+    } finally {
+      running = null;
+    }
+  })();
+  running = run;
+  return run;
 }
 
 // ---------------------------------------------------------------------------
@@ -141,7 +164,7 @@ function div(className: string, parent: Element): HTMLDivElement {
   return el;
 }
 
-function mountHost(css: string): { host: HTMLElement; root: ShadowRoot; wrap: HTMLDivElement } {
+function mountHost(css: string): { host: HTMLElement; wrap: HTMLDivElement; root: ShadowRoot } {
   const host = document.createElement('div');
   host.setAttribute(OUR_ATTR, 'glitch');
   const root = host.attachShadow({ mode: 'closed' });
@@ -150,7 +173,7 @@ function mountHost(css: string): { host: HTMLElement; root: ShadowRoot; wrap: HT
   const wrap = document.createElement('div');
   wrap.className = 'wrap';
   root.append(style, wrap);
-  return { host, root, wrap };
+  return { host, wrap, root };
 }
 
 const clamp01 = (x: number) => (x < 0 ? 0 : x > 1 ? 1 : x);
@@ -178,97 +201,120 @@ function darkness(u: number): number {
 }
 const DIM_KEYS: Key[] = [[0, { opacity: 0 }, EASE_OUT], [0.07, { opacity: 1 }], [RELEASE, { opacity: 1 }, EASE_IN_OUT], [0.95, { opacity: 0 }], [1, { opacity: 0 }]];
 
-interface Glyph {
+/** A letter (grapheme) of a Latin-like word, or a whole word of a script that must stay joined. */
+interface Unit {
   el: HTMLSpanElement;
+  /** Reveal order, 0..1. */
   at: number;
   out: number;
-  shown: string;
+  whole: boolean;
+  shown: boolean;
   corrupt: string;
   shadow: string;
   transform: string;
 }
 
+function graphemes(word: string): string[] {
+  const Segmenter = (Intl as { Segmenter?: typeof Intl.Segmenter }).Segmenter;
+  if (!Segmenter) return Array.from(word);
+  return Array.from(new Segmenter(undefined, { granularity: 'grapheme' }).segment(word), (s) => s.segment);
+}
+
 /**
- * The message as words of glyphs. Words wrap as a whole at spaces, and a word too
- * long for the screen wraps inside itself, so nothing ever runs off the edge.
+ * The message as words. Latin-like words are split into graphemes that can
+ * jitter and corrupt; words in joining or reordering scripts stay whole and are
+ * revealed as a unit. Words wrap at spaces, and a word too long for the screen
+ * wraps inside itself, so nothing ever runs off the edge.
  */
-function buildMessage(parent: HTMLElement, text: string, rand: () => number): { msg: HTMLDivElement; glyphs: Glyph[] } {
+function buildMessage(parent: HTMLElement, text: string, rand: () => number): { msg: HTMLDivElement; units: Unit[]; words: HTMLElement[] } {
   const stage = div('stage', parent);
   const msg = div('msg', stage);
-  const glyphs: Glyph[] = [];
+  msg.dir = 'auto';
   const words = text.trim().split(/\s+/).filter(Boolean);
-  const count = words.reduce((n, w) => n + [...w].length, 0);
+  const shaped = SHAPED.test(text);
+  const pieces = words.map((w) => (shaped ? [w] : graphemes(w)));
+  const count = pieces.reduce((n, p) => n + p.length, 0);
+  const units: Unit[] = [];
+  const wordEls: HTMLElement[] = [];
   let i = 0;
-  words.forEach((word, wi) => {
+  pieces.forEach((parts, wi) => {
     if (wi > 0) msg.appendChild(document.createTextNode(' '));
     const w = document.createElement('span');
-    w.className = 'w';
-    for (const ch of word) {
+    w.className = shaped ? 'wd h' : 'w';
+    if (shaped) w.textContent = parts[0];
+    for (const part of shaped ? [] : parts) {
       const g = document.createElement('span');
       g.className = 'g h';
-      const inner = document.createElement('span');
-      inner.textContent = ch;
-      g.appendChild(inner);
+      g.textContent = part;
       w.appendChild(g);
-      const p = count > 1 ? i / (count - 1) : 0;
-      glyphs.push({ el: g, at: p, out: rand(), shown: 'h', corrupt: '', shadow: '', transform: '' });
+    }
+    const els = shaped ? [w] : (Array.from(w.children) as HTMLSpanElement[]);
+    for (const el of els) {
+      units.push({ el, at: count > 1 ? i / (count - 1) : 0, out: rand(), whole: shaped, shown: false, corrupt: '', shadow: '', transform: '' });
       i++;
     }
     msg.appendChild(w);
+    wordEls.push(w);
   });
-  return { msg, glyphs };
+  return { msg, units, words: wordEls };
 }
 
-/** Big enough to own the screen, small enough to fit it, at any width. */
-function fitMessage(msg: HTMLDivElement, length: number): void {
+/**
+ * The largest size, found against the real layout, at which no word has to
+ * break inside itself and the block stays a comfortable height. Short lines are
+ * kept on one line where they can be.
+ */
+function fitMessage(msg: HTMLDivElement, words: HTMLElement[], length: number): void {
   const vw = innerWidth;
   const vh = innerHeight;
+  const narrow = vw < 640;
+  const maxH = vh * (narrow ? 0.5 : 0.4);
   const avail = Math.min(vw * 0.88, 1180);
-  const lines = length <= 18 ? 1 : length <= 40 ? 2 : 3;
-  const perLine = Math.ceil(length / lines) + 1;
-  let size = Math.max(20, Math.min(avail / (perLine * 0.9), (vh * 0.48) / (lines * 1.15), 124));
-  const words = Array.from(msg.children) as HTMLElement[];
-  for (let n = 0; n < 10; n++) {
+  const perLine = Math.min(length, narrow ? 9 : 16);
+  const fits = (size: number) => {
     msg.style.fontSize = `${size.toFixed(1)}px`;
-    // Fits when no word had to break inside itself and the block is not too tall.
-    const whole = words.every((w) => w.offsetHeight < size * 1.7);
-    if ((whole && msg.offsetHeight <= vh * 0.6) || size <= 18) break;
-    size *= 0.92;
+    if (msg.offsetHeight > maxH) return false;
+    return words.every((w) => w.getClientRects().length <= 1 && w.offsetHeight < size * 1.7);
+  };
+  let lo = 16;
+  let hi = Math.max(lo, Math.min(116, vh * 0.15, avail / (Math.max(1, perLine) * 0.95)));
+  if (fits(hi)) return;
+  for (let n = 0; n < 8; n++) {
+    const mid = (lo + hi) / 2;
+    if (fits(mid)) lo = mid;
+    else hi = mid;
   }
+  fits(lo);
 }
 
-function placeGhost(wrap: HTMLElement, rand: () => number): HTMLDivElement {
+/** The face goes above the words, centred near the top third, chin clear of the text. */
+function placeGhost(wrap: HTMLElement, rand: () => number, textTop: number): HTMLDivElement {
   const ghost = div('ghost', wrap);
-  const h = Math.min(innerHeight * 0.64, innerWidth * 0.95);
+  const vh = innerHeight;
+  const top = vh * 0.04;
+  const room = (textTop - vh * 0.02 - top) / APPARITION_CHIN;
+  let h = Math.min(vh * 0.56, innerWidth * 0.8);
+  if (room > vh * 0.22) h = Math.min(h, room);
   ghost.style.width = `${Math.round(h * 0.75)}px`;
   ghost.style.height = `${Math.round(h)}px`;
+  ghost.style.top = `${Math.round(Math.max(top, Math.min(vh * 0.3 - h * 0.42, textTop - vh * 0.02 - h * APPARITION_CHIN)))}px`;
   ghost.appendChild(drawApparition(rand));
   return ghost;
-}
-
-/** Undo-able inline style, restored exactly, including removing a style attribute we created. */
-function tempStyle(el: HTMLElement, prop: string, value: string): () => void {
-  const hadAttr = el.hasAttribute('style');
-  const prev = el.style.getPropertyValue(prop);
-  const priority = el.style.getPropertyPriority(prop);
-  el.style.setProperty(prop, value);
-  return () => {
-    el.style.setProperty(prop, prev, priority);
-    if (!hadAttr && el.getAttribute('style') === '') el.removeAttribute('style');
-  };
 }
 
 /**
  * Can backdrop-filter take an SVG filter here? Only Chromium renders it; others
  * accept the syntax and draw nothing. userAgentData is Chromium-only but needs a
- * secure context, so plain http pages are recognised by the UA token instead.
+ * secure context, so plain http pages are recognised by the UA token instead,
+ * and Gecko pretending to be Chrome is caught by its own CSS.
  */
 function svgBackdrops(): boolean {
   const chromium = 'userAgentData' in navigator || /\bChrom(e|ium)\/\d/.test(navigator.userAgent);
-  return chromium && CSS.supports('backdrop-filter', 'url(#a)');
+  const gecko = CSS.supports('-moz-appearance', 'none');
+  return chromium && !gecko && CSS.supports('backdrop-filter', 'url(#a)');
 }
 
-/** A damped spring on the nominal timeline: things with weight overshoot and settle. */
+/** A damped spring: things with weight overshoot and settle. */
 class Spring {
   x = 0;
   v = 0;
@@ -290,50 +336,78 @@ class Spring {
 // ---------------------------------------------------------------------------
 // The full glitch
 
+type Tier = 'full' | 'lite' | 'css';
+
 function glitch(message: string, duration: number, seed: number): Scene {
+  const { host, wrap, root } = mountHost(BASE_CSS + GLITCH_CSS);
+  let scene: Scene | null = null;
+  try {
+    scene = buildGlitch(host, wrap, root, message, duration, seed);
+    return scene;
+  } finally {
+    // Whatever failed while setting up, nothing of it stays in the page.
+    if (!scene) host.remove();
+  }
+}
+
+function buildGlitch(host: HTMLElement, wrap: HTMLDivElement, root: ShadowRoot, message: string, duration: number, seed: number): Scene {
   const rand = seeded(seed);
   const pick = <T>(list: ArrayLike<T>): T => list[Math.floor(rand() * list.length)];
   const vw = innerWidth;
   const vh = innerHeight;
   const scale = Math.min(1.5, Math.max(0.6, vw / 1280));
-  // The filters are static markup; a page enforcing Trusted Types refuses it, and
-  // then the CSS version plays instead.
-  const holder = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-  let svg = svgBackdrops();
-  try {
-    if (svg) holder.innerHTML = '<filter id="probe"/>';
-  } catch {
-    svg = false;
-  }
-  const { host, root, wrap } = mountHost(BASE_CSS + GLITCH_CSS);
+  // Physics and glyph ticks run in real time up to 1.8 s; longer runs are slow motion.
+  const nominal = Math.min(1.8, Math.max(1.1, duration / 1000));
+  const ticks = Math.round(33 * nominal);
+  let tier: Tier = svgBackdrops() ? 'full' : 'css';
+  const svg = tier === 'full';
   if (!svg) wrap.classList.add('css');
-  let filters = '';
-  const useFilter = (el: HTMLElement, id: string, markup: string) => {
-    filters += markup;
-    el.style.backdropFilter = `url(#${id})`;
-  };
+  const filters: SVGElement[] = [];
 
-  // Bottom to top. The page is split and darkened first; the words and the face
-  // sit above that, under the slices, blocks and tracking that tear them too.
-  const split = svg ? div('fill', wrap) : null;
-  if (split) useFilter(split, 'pg', splitFilter('pg'));
-  const dim = div('fill dim', wrap);
-  if (split) dim.style.display = 'none';
-  const ghost = placeGhost(wrap, rand);
-  const { msg, glyphs } = buildMessage(wrap, message, rand);
+  // Bottom to top. The page is split and darkened first; the face and the words
+  // sit above that, under the slices, blocks and tracking that can tear them.
+  const split = svg ? splitFilter('pg') : null;
+  const splitEl = split ? div('fill', wrap) : null;
+  if (split && splitEl) {
+    filters.push(split.filter);
+    splitEl.style.backdropFilter = 'url(#pg)';
+  }
+  const dim = div('fill dim tint', wrap);
+  if (svg) dim.style.display = 'none';
+  const { msg, units, words } = buildMessage(wrap, message, rand);
+  document.documentElement.appendChild(host);
+  fitMessage(msg, words, units.length);
+  const box = msg.getBoundingClientRect();
+  const pad = Math.max(12, vh * 0.03);
+  const text = { top: box.top - pad, bottom: box.bottom + pad, left: box.left - pad, right: box.right + pad };
+  const ghost = placeGhost(wrap, rand, box.top);
+  wrap.insertBefore(ghost, msg.parentElement);
+  // The eyes: kept clear while the face is up, so it is seen before it is torn.
+  const gTop = ghost.offsetTop;
+  const gH = ghost.offsetHeight;
+  const eyes = { top: gTop + gH * 0.28, bottom: gTop + gH * 0.52 };
 
   const bands = Array.from({ length: BANDS }, (_, i) => {
     const el = div(`band t${i % 3}`, wrap);
-    const h = Math.round(vh * (0.02 + rand() * rand() * 0.12));
+    const h = Math.round(vh * (0.02 + rand() * rand() * 0.11));
     el.style.height = `${h}px`;
-    if (svg) useFilter(el, `b${i}`, splitFilter(`b${i}`));
-    else el.style.width = `${Math.round(40 + rand() * 50)}%`;
-    return { el, h, y: 0, spring: new Spring(8 + rand() * 3, 0.26), shown: false };
+    const f = svg ? splitFilter(`b${i}`) : null;
+    if (f) {
+      filters.push(f.filter);
+      el.style.backdropFilter = `url(#b${i})`;
+    }
+    const cssWidth = `${Math.round(40 + rand() * 50)}%`;
+    if (!svg) el.style.width = cssWidth;
+    return { el, h, y: 0, baseX: Math.round(rand() * vw * 0.55), cssWidth, f, spring: new Spring(8 + rand() * 3, 0.26), shown: false };
   });
   const blocks = Array.from({ length: BLOCKS }, (_, i) => {
     const el = div('blk', wrap);
-    if (svg) useFilter(el, `m${i}`, moshFilter(`m${i}`, pick([6, 8, 8, 10])));
-    return el;
+    const f = svg ? moshFilter(`m${i}`, pick([6, 8, 8, 10])) : null;
+    if (f) {
+      filters.push(f.filter);
+      el.style.backdropFilter = `url(#m${i})`;
+    }
+    return { el, f };
   });
   const track = div('track', wrap);
   if (svg) {
@@ -341,84 +415,81 @@ function glitch(message: string, duration: number, seed: number): Scene {
     let left = 1;
     for (let i = 0; i < TRACK_SLICES; i++) {
       const el = div('', track);
-      const part = i === TRACK_SLICES - 1 ? left : left * (0.15 + rand() * 0.4);
+      const part = i === TRACK_SLICES - 1 ? left : left * (0.2 + rand() * 0.4);
       left -= part;
       el.style.height = `${(part * 100).toFixed(2)}%`;
-      useFilter(el, `t${i}`, shearFilter(`t${i}`, (rand() - 0.35) * 46 * scale));
+      filters.push(shearFilter(`t${i}`, (rand() - 0.35) * 46 * scale));
+      el.style.backdropFilter = `url(#t${i})`;
     }
   }
-  const snow = drawSnow(rand);
-  track.appendChild(snow);
+  track.appendChild(drawSnow(rand));
+  const shock = div('fill shock', wrap);
+  if (svg) shock.style.display = 'none';
   const flash = div('fill flash', wrap);
   // The screen itself: scanlines and a dark vignette over everything, edges first.
   const screen = div('fill vignette scan', wrap);
   const grain = drawGrain(vw, vh, rand);
   grain.className = 'grain';
   wrap.appendChild(grain);
+  const holder = filters.length ? svgEl('svg', { width: 0, height: 0, 'aria-hidden': 'true', style: 'position:absolute' }, filters) : null;
+  if (holder) root.appendChild(holder);
 
-  const hooks = (id: string) => {
-    const f = root.getElementById(id);
-    const get = (k: string) => f?.querySelector(`[data-k="${k}"]`) ?? null;
-    return { r: get('r'), g: get('g'), b: get('b'), mr: get('mr'), mg: get('mg'), mb: get('mb'), o: get('o') };
-  };
-  if (filters) {
-    holder.setAttribute('width', '0');
-    holder.setAttribute('height', '0');
-    holder.setAttribute('aria-hidden', 'true');
-    holder.style.position = 'absolute';
-    holder.innerHTML = filters;
-    root.appendChild(holder);
-  }
   const written = new Map<Element, string>();
-  const setAttrs = (el: Element | null, attrs: Record<string, string>) => {
+  const setAttrs = (el: Element | null | undefined, attrs: Record<string, string>) => {
     if (!el) return;
     const key = Object.values(attrs).join('|');
     if (written.get(el) === key) return;
     written.set(el, key);
     for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
   };
-  const setOffset = (el: Element | null, dx: number, dy = 0) => setAttrs(el, { dx: dx.toFixed(1), dy: dy.toFixed(1) });
+  const setOffset = (el: Element | null | undefined, dx: number, dy = 0) => setAttrs(el, { dx: dx.toFixed(1), dy: dy.toFixed(1) });
 
-  document.documentElement.appendChild(host);
-  fitMessage(msg, glyphs.length);
-
-  const cleanups: (() => void)[] = [];
   const opts: KeyframeAnimationOptions = { duration, fill: 'both' };
+  const visibleDuring = (spans: [number, number][]): Keyframe[] => {
+    const list: Key[] = [[0, { visibility: 'hidden' }, CUT]];
+    for (const [a, b] of spans) list.push([a, { visibility: 'visible' }, CUT], [b, { visibility: 'hidden' }, CUT]);
+    list.push([1, { visibility: 'hidden' }]);
+    return keys(list);
+  };
   const anims: Animation[] = [
     dim.animate(keys(DIM_KEYS), opts),
     screen.animate(keys([[0, { opacity: 0 }, EASE_OUT], [0.1, { opacity: 1 }], [RELEASE, { opacity: 1 }, EASE_IN_OUT], [0.95, { opacity: 0 }], [1, { opacity: 0 }]]), opts),
     // The one bright frame: a short photographic negative as it takes hold.
-    flash.animate(keys([[0, { visibility: 'hidden' }, CUT], [0.035, { visibility: 'visible' }, CUT], [0.085, { visibility: 'hidden' }], [1, { visibility: 'hidden' }]]), opts),
+    flash.animate(visibleDuring([[0.035, 0.085]]), opts),
+    shock.animate(visibleDuring(SHOCKS.map((s): [number, number] => [s, s + 0.025])), opts),
     track.animate(
       keys([
         [0, { transform: 'translateY(-30vh)' }],
-        [0.06, { transform: 'translateY(-18vh)' }, 'cubic-bezier(.45,.05,.55,.95)'],
-        [0.72, { transform: 'translateY(112vh)' }],
+        [0.02, { transform: 'translateY(-18vh)' }, 'cubic-bezier(.45,.05,.55,.95)'],
+        [0.34, { transform: 'translateY(112vh)' }],
         [1, { transform: 'translateY(112vh)' }],
       ]),
       opts,
     ),
-    // It surfaces once, drifts closer, and sinks back into the noise.
+    // A face in the negative, for one frame; later it surfaces once, drifts closer, and sinks back.
     ghost.animate(
       keys([
-        [0, { opacity: 0, transform: 'translate(-50%, -50%) scale(.94)' }],
-        [0.27, { opacity: 0, transform: 'translate(-50%, -50%) scale(.95)' }, EASE_OUT],
-        [0.33, { opacity: 0.3, transform: 'translate(-50%, -50%) scale(.965)' }, CUT],
-        [0.355, { opacity: 0.22, transform: 'translate(-49%, -50%) scale(.97)' }, CUT],
-        [0.375, { opacity: 0.38, transform: 'translate(-50%, -50%) scale(.975)' }],
-        [0.5, { opacity: 0.34, transform: 'translate(-50%, -50.5%) scale(1.01)' }, EASE_IN],
-        [0.6, { opacity: 0, transform: 'translate(-50%, -51%) scale(1.03)' }],
-        [1, { opacity: 0, transform: 'translate(-50%, -51%) scale(1.03)' }],
+        [0, { opacity: 0, transform: 'translateX(-50%) scale(.95)' }, CUT],
+        [0.035, { opacity: 0.55, transform: 'translateX(-50%) scale(1.04)' }, CUT],
+        [0.085, { opacity: 0, transform: 'translateX(-50%) scale(.95)' }],
+        [0.29, { opacity: 0, transform: 'translateX(-50%) scale(.95)' }, EASE_OUT],
+        [0.33, { opacity: 0.45, transform: 'translateX(-50%) scale(.965)' }, CUT],
+        [0.345, { opacity: 0.32, transform: 'translateX(-49.4%) scale(.97)' }, CUT],
+        [0.36, { opacity: 0.6, transform: 'translateX(-50%) scale(.975)' }],
+        [0.46, { opacity: 0.5, transform: 'translateX(-50%) translateY(-.5%) scale(1.01)' }, EASE_IN],
+        [0.58, { opacity: 0, transform: 'translateX(-50%) translateY(-1%) scale(1.03)' }],
+        [1, { opacity: 0, transform: 'translateX(-50%) translateY(-1%) scale(1.03)' }],
       ]),
       opts,
     ),
-    // Signal lost: the words collapse into a line and go out.
+    // The words' dark pool fades in with the dark; at the end, signal lost: they collapse into a line.
     msg.animate(
       keys([
-        [0, { transform: 'none', opacity: 1 }],
-        [0.79, { transform: 'none', opacity: 1 }, 'cubic-bezier(.55,0,.85,.35)'],
-        [0.86, { transform: 'scale(1.35, .012)', opacity: 1 }, CUT],
-        [0.875, { transform: 'scale(1.35, .012)', opacity: 0 }],
+        [0, { transform: 'none', opacity: 0 }, EASE_OUT],
+        [0.07, { transform: 'none', opacity: 1 }],
+        [0.81, { transform: 'none', opacity: 1 }, 'cubic-bezier(.55,0,.85,.35)'],
+        [0.87, { transform: 'scale(1.35, .012)', opacity: 1 }, CUT],
+        [GONE, { transform: 'scale(1.35, .012)', opacity: 0 }],
         [1, { transform: 'scale(1.35, .012)', opacity: 0 }],
       ]),
       opts,
@@ -426,101 +497,109 @@ function glitch(message: string, duration: number, seed: number): Scene {
   ];
   // Film grain, jittered about 24 times a second. Its average brightness never changes.
   const grainKeys: Key[] = [];
-  for (let i = 0; i <= 26; i++) {
-    const t = i / 26;
+  const grainSteps = Math.round(24 * nominal);
+  for (let i = 0; i <= grainSteps; i++) {
+    const t = i / grainSteps;
     const op = 0.55 * smooth(0.02, 0.1, t) * (1 - smooth(0.84, 0.96, t));
     grainKeys.push([t, { opacity: op, transform: `translate(${((rand() - 0.5) * 4).toFixed(2)}%, ${((rand() - 0.5) * 4).toFixed(2)}%)` }, CUT]);
   }
   anims.push(grain.animate(keys(grainKeys), opts));
 
-  // Without SVG filters the page itself shudders: the body moves, never <html>,
-  // and sideways overflow is clipped meanwhile so no scrollbar flashes up.
-  if (!svg && document.body) {
-    const sim = { x: new Spring(7, 0.38), y: new Spring(7, 0.38) };
-    const frames: Keyframe[] = [];
-    let last = 0;
-    for (let i = 0; i <= 60; i++) {
-      const u = i / 60;
-      sim.x.target = u > 0.02 && u < 0.09 ? 12 * scale : 0;
-      sim.y.target = u > 0.02 && u < 0.09 ? -14 * scale : 0;
-      if (u >= 0.84 && last < 0.84) sim.x.v += 260 * scale;
-      if (u > 0.94) sim.x.damping = sim.y.damping = 1.2;
-      sim.x.step((u - last) * NOMINAL_S);
-      sim.y.step((u - last) * NOMINAL_S);
-      last = u;
-      const still = u >= SETTLED;
-      frames.push({ offset: u, transform: still ? 'none' : `translate(${sim.x.x.toFixed(1)}px, ${sim.y.x.toFixed(1)}px)` });
+  // --- Where slices and blocks may go. While the words hold, they stay clear of them.
+  let faceUp = false;
+  const clear = (y: number, h: number, zone: { top: number; bottom: number }) => y + h < zone.top || y > zone.bottom;
+  const rowsFree = (y: number, h: number) => clear(y, h, text) && (!faceUp || clear(y, h, eyes));
+  const boxFree = (x: number, y: number, w: number, h: number) => rowsFree(y, h) || x + w < text.left || x > text.right;
+  const placeBand = (band: (typeof bands)[number], avoid: boolean) => {
+    let y = 0;
+    for (let n = 0; n < 12; n++) {
+      // Bands gather around the middle of the screen, where the eye is.
+      const centre = vh * (0.5 + (rand() - 0.5) * (rand() < 0.6 ? 0.55 : 1.1));
+      y = Math.round(Math.min(vh - band.h, Math.max(0, centre - band.h / 2)));
+      if (!avoid || rowsFree(y, band.h)) break;
+      y = Math.min(vh - band.h, text.bottom + rand() * Math.max(0, vh - text.bottom - band.h));
     }
-    cleanups.push(tempStyle(document.documentElement, 'overflow-x', 'clip'));
-    anims.push(document.body.animate(frames, { duration, fill: 'none' }));
-  }
+    band.y = Math.round(y);
+  };
+  const tearThrough = (band: (typeof bands)[number]) => {
+    band.y = Math.round((box.top + box.bottom) / 2 - band.h / 2 + (rand() - 0.5) * box.height * 0.4);
+  };
+  bands.forEach((b) => placeBand(b, false));
+  const thinnest = bands.reduce((a, b) => (b.h < a.h ? b : a));
+  thinnest.h = Math.min(thinnest.h, Math.round(vh * 0.022));
+  thinnest.el.style.height = `${thinnest.h}px`;
+
+  // --- Quality: judged on a rolling median after a short warm-up, so it can still drop later.
+  const gaps: number[] = [];
+  let lastNow = 0;
+  let frames = 0;
+  const goLite = () => {
+    tier = 'lite';
+    wrap.classList.add('css');
+    if (splitEl) splitEl.style.display = 'none';
+    dim.style.display = '';
+    shock.style.display = '';
+    for (const b of bands) {
+      b.el.style.backdropFilter = '';
+      b.el.style.width = b.cssWidth;
+    }
+    for (const b of blocks) b.el.style.backdropFilter = '';
+    holder?.remove();
+  };
+  const judge = (now: number) => {
+    frames++;
+    if (lastNow && frames > 2) gaps.push(now - lastNow);
+    lastNow = now;
+    if (gaps.length > 6) gaps.shift();
+    const n = gaps.length;
+    if (n < 2) return;
+    const sorted = [...gaps].sort((a, b) => a - b);
+    const median = sorted[n >> 1];
+    if ((n >= 3 && median > SLOW_FRAME_MS) || sorted[0] > SLOW_FRAME_MS * 3) goLite();
+  };
 
   // --- Per frame: filter offsets, springs, blocks and glyphs.
-  const page = split ? hooks('pg') : null;
-  const bandHooks = svg ? bands.map((_, i) => hooks(`b${i}`)) : [];
-  const blockHooks = svg ? blocks.map((_, i) => hooks(`m${i}`)) : [];
   const gx = new Spring(7, 0.4);
   const gy = new Spring(7, 0.4);
-
-  const placeBand = (band: (typeof bands)[number]) => {
-    // Bands gather around the middle of the screen, where the eye is.
-    const centre = vh * (0.5 + (rand() - 0.5) * (rand() < 0.6 ? 0.5 : 1.1));
-    band.y = Math.round(Math.min(vh - band.h, Math.max(0, centre - band.h / 2)));
-    if (!svg) band.el.style.transform = `translate(${Math.round(rand() * vw * 0.6)}px, ${band.y}px)`;
-    else band.el.style.transform = `translateY(${band.y}px)`;
-  };
-  bands.forEach(placeBand);
-
   let lastU = 0;
   let hitIndex = 0;
   let lastHit = -1;
   let tick = -1;
   let moshTick = -1;
   let raf = 0;
-  let lite = !split;
-  const gaps: number[] = [];
-  let lastNow = 0;
-  const goLite = () => {
-    lite = true;
-    if (split) split.style.display = 'none';
-    dim.style.display = '';
-  };
   const clock = anims[0];
-  const setupDone = performance.now();
 
   const frame = (now: number) => {
     raf = requestAnimationFrame(frame);
+    if (tier === 'full') judge(now);
     const u = clamp01(Number(clock.currentTime ?? 0) / duration);
-    const dt = Math.max(0, (u - lastU) * NOMINAL_S);
-    const tau = u * NOMINAL_S;
+    const dt = Math.max(0, (u - lastU) * nominal);
+    const tau = u * nominal;
     const crossed = (at: number) => lastU < at && u >= at;
-    // A machine that cannot keep up loses the full-screen split, not the scene.
-    if (!lite && lastNow >= 0) {
-      // The first frame pays for setting up; judge the ones after it, quickly.
-      if (lastNow) gaps.push(now - lastNow);
-      else if (now - setupDone > 250) goLite();
-      lastNow = now;
-      const judged = gaps.slice(1);
-      const spent = judged.reduce((a, b) => a + b, 0);
-      if (judged.length >= 3 || spent > 150) {
-        const sorted = judged.sort((a, b) => a - b);
-        if (sorted[sorted.length >> 1] > SLOW_FRAME_MS) goLite();
-        gaps.length = 0;
-        lastNow = -1;
-      }
-    }
+    const holding = u >= HOLD_START && u < HOLD_END;
+    faceUp = u >= 0.3 && u < 0.5;
+    if (crossed(HOLD_START) || crossed(0.3)) for (const b of bands) if (!rowsFree(b.y, b.h)) placeBand(b, true);
     lastU = u;
     const env = smooth(0, 0.05, u) * (1 - smooth(0.78, 0.92, u));
     const still = u >= SETTLED;
 
     // Hits: the page is struck, slices are thrown and swing back with weight.
+    let tore = false;
     while (hitIndex < HITS.length && u >= HITS[hitIndex]) {
-      lastHit = HITS[hitIndex];
+      const at = HITS[hitIndex];
+      lastHit = at;
       const strength = hitIndex === 0 ? 1.3 : 0.6 + rand() * 0.5;
+      const inHold = at >= HOLD_START && at < HOLD_END;
       for (const band of bands) {
         const thrown = rand() < (hitIndex === 0 ? 0.85 : 0.5);
         band.spring.target = thrown ? (rand() < 0.5 ? -1 : 1) * vw * 0.05 * strength * (0.35 + rand() * 0.65) : 0;
-        if (rand() < 0.5) placeBand(band);
+        if (rand() < 0.5 || (inHold && !rowsFree(band.y, band.h))) placeBand(band, inHold);
+      }
+      if (at === TEAR_HIT) {
+        // The one tear allowed through the words: a thin slice, thrown once.
+        tearThrough(thinnest);
+        thinnest.spring.target = (rand() < 0.5 ? -1 : 1) * vw * 0.03;
+        tore = true;
       }
       gx.v += (rand() - 0.5) * 360 * scale * strength;
       hitIndex++;
@@ -529,30 +608,32 @@ function glitch(message: string, duration: number, seed: number): Scene {
     gx.target = slam ? 12 * scale : 0;
     gy.target = slam ? -16 * scale : 0;
     if (u >= RELEASE) for (const band of bands) band.spring.target = 0;
+    if (holding && u > TEAR_HIT + 0.04 && !rowsFree(thinnest.y, thinnest.h)) {
+      thinnest.spring.target = 0;
+      if (Math.abs(thinnest.spring.x) < 0.5) placeBand(thinnest, true);
+    }
     if (crossed(0.84)) gx.v += 240 * scale;
     const settling = u > 0.94;
     gx.damping = gy.damping = settling ? 1.2 : 0.4;
     gx.step(dt);
     gy.step(dt);
 
-    // The whole page: displaced, darkened, colour channels pulled apart.
-    if (page && !lite) {
-      const sinceHit = lastHit < 0 ? 9 : tau - lastHit * NOMINAL_S;
+    // The whole page: displaced, darkened, red pulled off cyan.
+    if (split && tier === 'full') {
+      const sinceHit = lastHit < 0 ? 9 : tau - lastHit * nominal;
       const kick = 11 * Math.exp(-sinceHit / 0.05);
       const s = still ? 0 : env * (3.5 + 2 * Math.sin(tau * 19) + 1.2 * Math.sin(tau * 41 + 1) + kick) * scale;
       const sy = s * 0.2 * Math.sin(tau * 13);
       const x = still ? 0 : gx.x;
       const y = still ? 0 : gy.x;
-      setOffset(page.r, x - s, y + sy);
-      setOffset(page.g, x, y);
-      setOffset(page.b, x + s, y - sy);
+      setOffset(split.r, x - s, y + sy);
+      setOffset(split.c, x + s, y - sy);
       const d = Math.round(darkness(u) * 200) / 200;
-      setAttrs(page.mr, { values: channelMatrix(0, d) });
-      setAttrs(page.mg, { values: channelMatrix(1, d) });
-      setAttrs(page.mb, { values: channelMatrix(2, d) });
+      setAttrs(split.mr, { values: channelMatrix('r', d) });
+      setAttrs(split.mc, { values: channelMatrix('gb', d) });
     }
 
-    bands.forEach((band, i) => {
+    for (const band of bands) {
       band.spring.damping = settling ? 1.2 : 0.26;
       band.spring.step(dt);
       const x = still ? 0 : band.spring.x;
@@ -563,50 +644,58 @@ function glitch(message: string, duration: number, seed: number): Scene {
         band.el.style.visibility = visible ? 'visible' : 'hidden';
         band.shown = visible;
       }
-      if (!visible) return;
-      if (svg) {
-        const h = bandHooks[i];
-        setOffset(h.r, x - fringe);
-        setOffset(h.g, x);
-        setOffset(h.b, x + fringe);
+      if (!visible) continue;
+      if (tier === 'full' && band.f) {
+        setOffset(band.f.r, x - fringe);
+        setOffset(band.f.c, x + fringe);
+        band.el.style.transform = `translateY(${band.y}px)`;
       } else {
-        band.el.style.transform = `translate(${(x * 3).toFixed(1)}px, ${band.y}px)`;
+        band.el.style.transform = `translate(${(band.baseX + x * 3).toFixed(1)}px, ${band.y}px)`;
       }
-    });
+    }
 
     // Datamosh bursts: blocks of the page crushed and dragged, held a few frames each.
     const burst = MOSH_BURSTS.find(([a, b]) => u >= a && u < b);
     const mt = burst ? Math.floor(u / 0.035) : -1;
     if (mt !== moshTick) {
       moshTick = mt;
-      blocks.forEach((el, i) => {
+      for (const { el, f } of blocks) {
         if (!burst || still || rand() < 0.3) {
           el.style.visibility = 'hidden';
-          return;
+          continue;
         }
         // Snapped to a 16 px grid, like the macroblocks of real video.
         const q = (n: number) => Math.max(16, Math.round(n / 16) * 16);
         const w = q(vw * (0.04 + rand() * rand() * 0.22));
         const h = q(vh * (0.02 + rand() * rand() * 0.1));
-        const x = q(rand() * (vw - w));
-        const y = q(vh * (0.15 + rand() * 0.7) - h / 2);
-        // The element is three blocks tall and shows only the middle one, so the
-        // block can be filled with page from above or below it: a misplaced macroblock.
+        let x = 0;
+        let y = 0;
+        for (let n = 0; n < 8; n++) {
+          x = q(rand() * (vw - w));
+          y = q(vh * (0.15 + rand() * 0.7) - h / 2);
+          if (!holding || boxFree(x, y, w, h)) break;
+        }
+        if (holding && !boxFree(x, y, w, h)) {
+          el.style.visibility = 'hidden';
+          continue;
+        }
+        // Three blocks tall, showing only the middle one, so it can be filled
+        // with page from above or below it: a misplaced macroblock.
         el.style.width = `${w}px`;
         el.style.height = `${h * 3}px`;
         el.style.clipPath = `inset(${h}px 0)`;
         el.style.transform = `translate(${x}px, ${y - h}px)`;
         el.style.visibility = 'visible';
-        if (svg) setOffset(blockHooks[i].o, Math.round((rand() - 0.5) * w * 0.4), (rand() < 0.5 ? -1 : 1) * Math.round(h * (0.5 + rand() * 0.5)));
-      });
+        if (f && tier === 'full') setOffset(f.o, Math.round((rand() - 0.5) * w * 0.4), (rand() < 0.5 ? -1 : 1) * Math.round(h * (0.5 + rand() * 0.5)));
+      }
     }
 
-    // Glyphs: they type themselves in through noise, twitch, and corrupt as it lets go.
-    const t = Math.floor(u * TICKS);
-    if (t !== tick) {
-      const hitNow = lastHit >= 0 && u - lastHit < 1 / TICKS;
+    // Glyphs: they type themselves in through noise, hold, and corrupt as it lets go.
+    const t = Math.floor(u * ticks);
+    if (t !== tick || tore) {
       tick = t;
-      for (const g of glyphs) updateGlyph(g, u, hitNow, rand, pick);
+      const twitch = tore ? new Set([pick(units), pick(units)]) : null;
+      for (const unit of units) updateUnit(unit, u, !!twitch?.has(unit), rand, pick);
     }
   };
   raf = requestAnimationFrame(frame);
@@ -615,26 +704,21 @@ function glitch(message: string, duration: number, seed: number): Scene {
     end() {
       cancelAnimationFrame(raf);
       anims.forEach((a) => a.cancel());
-      cleanups.forEach((fn) => fn());
       host.remove();
     },
   };
 }
 
-const REVEAL_START = 0.09;
-const REVEAL_SPREAD = 0.3;
-const CORRUPT_FOR = 0.06;
-
-function updateGlyph(g: Glyph, u: number, hitNow: boolean, rand: () => number, pick: (s: string) => string): void {
+function updateUnit(g: Unit, u: number, twitch: boolean, rand: () => number, pick: (s: string) => string): void {
   const at = REVEAL_START + g.at * REVEAL_SPREAD;
-  const outAt = 0.7 + g.out * 0.1;
-  let shown = 'v';
+  const outAt = HOLD_END + g.out * 0.03;
+  let shown = true;
   let corrupt = '';
-  let jx = (rand() - 0.5) * 1.4;
-  let jy = (rand() - 0.5) * 1;
+  let jx = 0;
+  let jy = 0;
   let chroma = 0;
-  if (u < at || u >= 0.875) {
-    shown = 'h';
+  if (u < at || u >= GONE) {
+    shown = false;
   } else if (u < at + CORRUPT_FOR) {
     // Arriving: noise first, then a near-miss letter, then the real one.
     corrupt = u < at + CORRUPT_FOR * 0.55 ? pick(NOISE_GLYPHS) : pick(NEAR_GLYPHS);
@@ -642,27 +726,33 @@ function updateGlyph(g: Glyph, u: number, hitNow: boolean, rand: () => number, p
     jy = (rand() - 0.5) * 5;
     chroma = 4;
   } else if (u >= outAt) {
-    if (rand() < 0.55) corrupt = pick(rand() < 0.6 ? NOISE_GLYPHS : NEAR_GLYPHS);
+    if (rand() < 0.5) corrupt = pick(rand() < 0.6 ? NOISE_GLYPHS : NEAR_GLYPHS);
     jx = (rand() - 0.5) * 8;
     chroma = 3;
-  } else if (hitNow && rand() < 0.35) {
-    jx = (rand() - 0.5) * 14;
-    chroma = 5;
-    if (rand() < 0.3) corrupt = pick(NOISE_GLYPHS);
-  } else if (u > 0.42 && rand() < 0.035) {
-    corrupt = pick(NOISE_GLYPHS);
+  } else if (twitch) {
+    jx = (rand() - 0.5) * 12;
+    chroma = 4;
+  } else if (u < HOLD_START) {
+    // Still settling in: a faint tremor.
+    jx = (rand() - 0.5) * 1.4;
+    jy = (rand() - 0.5) * 1;
+  }
+  if (g.whole) {
+    // Joined scripts: revealed and shaken as a word, never broken into noise.
+    corrupt = '';
+    jx = jy = 0;
   }
   if (shown !== g.shown) {
-    g.el.classList.toggle('h', shown === 'h');
+    g.el.classList.toggle('h', !shown);
     g.shown = shown;
   }
-  if (shown === 'h') return;
+  if (!shown) return;
   if (corrupt !== g.corrupt) {
     if (corrupt) g.el.setAttribute('data-c', corrupt);
     else g.el.removeAttribute('data-c');
     g.corrupt = corrupt;
   }
-  const transform = `translate(${jx.toFixed(1)}px, ${jy.toFixed(1)}px)`;
+  const transform = jx || jy ? `translate(${jx.toFixed(1)}px, ${jy.toFixed(1)}px)` : '';
   if (transform !== g.transform) {
     g.el.style.transform = transform;
     g.transform = transform;
@@ -680,28 +770,33 @@ function updateGlyph(g: Glyph, u: number, hitNow: boolean, rand: () => number, p
 function calm(message: string, duration: number, seed: number): Scene {
   const rand = seeded(seed);
   const { host, wrap } = mountHost(BASE_CSS);
-  const dim = div('fill dim', wrap);
-  const vignette = div('fill vignette', wrap);
-  const ghost = placeGhost(wrap, rand);
-  const { msg, glyphs } = buildMessage(wrap, message, rand);
-  for (const g of glyphs) g.el.classList.remove('h');
-  document.documentElement.appendChild(host);
-  fitMessage(msg, glyphs.length);
+  try {
+    const dim = div('fill dim tint', wrap);
+    const vignette = div('fill vignette', wrap);
+    const { msg, units, words } = buildMessage(wrap, message, rand);
+    for (const g of units) g.el.classList.remove('h');
+    document.documentElement.appendChild(host);
+    fitMessage(msg, words, units.length);
+    const ghost = placeGhost(wrap, rand, msg.getBoundingClientRect().top);
+    wrap.insertBefore(ghost, msg.parentElement);
 
-  const opts: KeyframeAnimationOptions = { duration, fill: 'both' };
-  const fade = (peak: number, from: number, to: number) =>
-    keys([[0, { opacity: 0 }], [from, { opacity: 0 }, EASE_IN_OUT], [from + 0.28, { opacity: peak }], [to - 0.26, { opacity: peak }, EASE_IN_OUT], [to, { opacity: 0 }], [1, { opacity: 0 }]]);
-  const anims = [
-    dim.animate(fade(1, 0, 1), opts),
-    vignette.animate(fade(1, 0, 1), opts),
-    ghost.animate(fade(0.12, 0.08, 0.92), opts),
-    msg.animate(fade(1, 0.06, 0.94), opts),
-  ];
-  ghost.style.transform = 'translate(-50%, -50%)';
-  return {
-    end() {
-      anims.forEach((a) => a.cancel());
-      host.remove();
-    },
-  };
+    const opts: KeyframeAnimationOptions = { duration, fill: 'both' };
+    const fade = (peak: number, from: number, to: number) =>
+      keys([[0, { opacity: 0 }], [from, { opacity: 0 }, EASE_IN_OUT], [from + 0.28, { opacity: peak }], [to - 0.26, { opacity: peak }, EASE_IN_OUT], [to, { opacity: 0 }], [1, { opacity: 0 }]]);
+    const anims = [
+      dim.animate(fade(1, 0, 1), opts),
+      vignette.animate(fade(1, 0, 1), opts),
+      ghost.animate(fade(0.16, 0.08, 0.92), opts),
+      msg.animate(fade(1, 0.06, 0.94), opts),
+    ];
+    return {
+      end() {
+        anims.forEach((a) => a.cancel());
+        host.remove();
+      },
+    };
+  } catch (err) {
+    host.remove();
+    throw err;
+  }
 }
