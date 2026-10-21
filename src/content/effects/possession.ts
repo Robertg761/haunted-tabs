@@ -51,6 +51,7 @@ const SHAPED = /[֐-ࣿऀ-෿฀-࿿က-႟ក-᢯ᨀ-᪯ꠀ-꯿יִ-﷿ﹰ-﻿]
 
 const BASE_CSS = `
 :host { all: initial; }
+@media print { :host { display: none !important; } }
 .wrap { position: fixed; inset: 0; pointer-events: none; overflow: hidden; z-index: ${Z.possession}; }
 .fill { position: absolute; inset: 0; }
 .dim { opacity: 0; backdrop-filter: contrast(.72) brightness(.36) saturate(.4); -webkit-backdrop-filter: contrast(.72) brightness(.36) saturate(.4); }
