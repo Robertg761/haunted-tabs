@@ -11,16 +11,18 @@ hydrateIcons();
 const body = document.body;
 const enabledInput = $<HTMLInputElement>('enabled');
 const searchInput = $<HTMLInputElement>('search');
+const searchClear = $<HTMLButtonElement>('search-clear');
 const groupSelect = $<HTMLSelectElement>('group');
 const thresholdSelect = $<HTMLSelectElement>('threshold');
 const list = $<HTMLElement>('list');
 const notice = $<HTMLElement>('notice');
 const meter = $<HTMLElement>('meter');
-const meterFill = $<HTMLElement>('meter-fill');
 const content = $<HTMLElement>('content');
+const header = document.querySelector<HTMLElement>('.top')!;
 const sheet = $<HTMLElement>('settings');
+const scrim = $<HTMLElement>('scrim');
 const settingsToggle = $<HTMLButtonElement>('settings-toggle');
-const pips = [...$('pips').children] as HTMLElement[];
+const exorciseButton = $<HTMLButtonElement>('exorcise');
 
 const CHECKS = ['possession', 'poltergeist', 'cobwebs', 'dust', 'fog', 'eyes', 'drips', 'shadow', 'ghostCursor', 'whispers', 'autoDiscard', 'autoBury'] as const;
 
@@ -28,19 +30,79 @@ const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
 const calm = () => reducedMotion.matches;
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
+const store = {
+  get(key: string): string | null {
+    try {
+      return localStorage.getItem(key);
+    } catch {
+      return null;
+    }
+  },
+  set(key: string, value: string): void {
+    try {
+      localStorage.setItem(key, value);
+    } catch {
+      // Not remembered this time; harmless.
+    }
+  },
+};
 
 let snap: Snapshot | undefined;
 let lastSignature = '';
 let statsSignature = '';
 let timelineFor = NaN;
-/** Settings waiting on a permission prompt; the 1 s refresh must not undo them. */
+let shownLevel = -1;
+/** Settings waiting on a permission prompt or a save; the 1 s refresh must not undo them. */
 const pending = new Set<string>();
+
+/** Only touch the DOM when a value really changes, so assistive tech is not told every second. */
+function setText(node: Element, text: string): void {
+  if (node.textContent !== text) node.textContent = text;
+}
+function setAttr(node: Element, name: string, value: string): void {
+  if (node.getAttribute(name) !== value) node.setAttribute(name, value);
+}
 
 async function ask<T = Snapshot>(req: PopupRequest): Promise<T> {
   const res = await ext.runtime.sendMessage(req);
   if (res && typeof res === 'object' && 'error' in res) throw new Error(String(res.error));
   return res as T;
 }
+
+// Responses can overtake each other (the 1 s refresh against a settings change),
+// so each one is numbered and anything older than what is on screen is dropped.
+let issued = 0;
+let applied = 0;
+async function load(req: PopupRequest): Promise<void> {
+  const n = ++issued;
+  const s = await ask(req);
+  if (n < applied) return;
+  applied = n;
+  show(s);
+}
+
+// ── Fit ────────────────────────────────────────────────────────────────────
+
+/**
+ * The popup is 600px tall, but the browser caps it at 600 device pixels, which
+ * is fewer CSS pixels when the page is zoomed. Shrink to the real viewport then,
+ * so the list gives way instead of the footer falling off the bottom. Measured
+ * after the popup settles; viewport units are unreliable while it auto-sizes.
+ */
+let fitTimer = 0;
+function fit(): void {
+  clearTimeout(fitTimer);
+  fitTimer = window.setTimeout(() => {
+    const h = window.innerHeight;
+    const target = h >= 600 || h < 240 ? '' : `${h}px`;
+    if (document.documentElement.style.getPropertyValue('--app-h') !== target) {
+      if (target) document.documentElement.style.setProperty('--app-h', target);
+      else document.documentElement.style.removeProperty('--app-h');
+    }
+  }, 200);
+}
+addEventListener('resize', fit);
+fit();
 
 // ── Notices ────────────────────────────────────────────────────────────────
 
@@ -75,59 +137,98 @@ function announce(text: string): void {
   setTimeout(() => (live.textContent = text), 50);
 }
 
-// ── Header, meter and settings ─────────────────────────────────────────────
+// ── Header, level and settings ─────────────────────────────────────────────
 
 function renderHeader(s: Snapshot): void {
   const on = s.settings.enabled;
-  body.dataset.level = String(on ? s.level.index : 0);
+  const blocked = on && !s.hostPermission;
+  setAttr(body, 'data-level', String(on && !blocked ? s.level.index : 0));
   body.classList.toggle('dormant', !on);
+  body.classList.toggle('no-access', blocked);
   body.classList.toggle('no-polt', !s.settings.poltergeist);
   if (!pending.has('enabled')) enabledInput.checked = on;
-  $('enabled-label').textContent = on ? 'Haunting' : 'Dormant';
-  $('level-name').textContent = on ? s.level.name : 'Dormant';
-  $('level-blurb').textContent = on ? s.level.blurb : 'The spirits sleep until you wake them.';
-  const pct = on ? s.level.pct : 0;
-  meterFill.style.setProperty('--pct', pct.toFixed(4));
-  meter.setAttribute('aria-valuenow', String(Math.round(pct * 100)));
-  meter.setAttribute('aria-valuetext', `${on ? s.level.name : 'Dormant'}, ${Math.round(pct * 100)}%`);
-  pips.forEach((pip, i) => pip.classList.toggle('lit', on && i <= s.level.index));
-  $('intro').hidden = on;
-
-  const windows = new Set(s.tabs.map((t) => t.windowId)).size;
-  $('summary').textContent = `${plural(s.tabs.length, 'tab')} in ${plural(windows, 'window')}`;
+  setText($('enabled-label'), blocked ? 'Needs access' : on ? 'Haunting' : 'Dormant');
+  setAttr($('switch'), 'title', on ? 'Put the spirits back to sleep (exorcises every tab)' : 'Wake the spirits');
 
   const counts = [0, 0, 0, 0, 0];
   for (const t of s.tabs) counts[t.stage]++;
+  const turned = counts[1] + counts[2] + counts[3] + counts[4];
+  const windows = new Set(s.tabs.map((t) => t.windowId)).size;
+  const tally = `${plural(s.tabs.length, 'tab')} in ${plural(windows, 'window')}`;
+  // The level counts crowding too, so it can rise before any tab has turned.
+  const mood = !on
+    ? tally
+    : blocked
+      ? 'Waiting for permission to haunt.'
+      : turned === 0 && s.level.index > 0
+        ? `${plural(s.tabs.length, 'tab')} crowd the strip.`
+        : s.level.blurb;
+  const blurb = $('level-blurb');
+  setText(blurb, mood);
+  setAttr(blurb, 'title', on ? `${mood} ${tally}.` : tally);
+  setAttr(searchInput, 'placeholder', `Search ${plural(s.tabs.length, 'tab')}`);
+
+  setText($('level-name'), on ? s.level.name : 'Dormant');
+  const pct = on && !blocked ? s.level.pct : 0;
+  const pctText = pct.toFixed(3);
+  if (meter.style.getPropertyValue('--pct') !== pctText) meter.style.setProperty('--pct', pctText);
+  setAttr(meter, 'aria-valuenow', String(Math.round(pct * 100)));
+  setAttr(meter, 'aria-valuetext', `${on ? s.level.name : 'Dormant'}, ${Math.round(pct * 100)}%`);
+  if (on && !blocked && s.level.index !== shownLevel) {
+    if (shownLevel >= 0) announce(`Haunt level ${s.level.name}. ${s.level.blurb}`);
+    shownLevel = s.level.index;
+    shine();
+  }
+  if (!on) shownLevel = -1;
+
+  const introDismissed = store.get('introDismissed') === '1';
+  $('intro').hidden = on || introDismissed;
+  $('sleep').hidden = on || !introDismissed;
+
   const stats = JSON.stringify([on, counts]);
   if (stats !== statsSignature) {
     statsSignature = stats;
     const chips: Node[] = [];
     for (const stage of [Stage.Withering, Stage.Ghost, Stage.Dead, Stage.Entombed]) {
       if (!counts[stage]) continue;
-      chips.push(el('span', { class: `stat s${stage}` }, icon(STAGE_ICON[stage]), el('b', { text: String(counts[stage]) }), ` ${STAGE_NAMES[stage]}`));
+      chips.push(
+        el(
+          'span',
+          { class: `stat s${stage}`, title: `${counts[stage]} ${STAGE_NAMES[stage]}` },
+          icon(STAGE_ICON[stage]),
+          el('b', { text: String(counts[stage]) }),
+          el('span', { class: 'visually-hidden', text: ` ${STAGE_NAMES[stage]}` }),
+        ),
+      );
     }
-    if (!chips.length) chips.push(el('span', { class: 'stat calm' }, icon('candle'), 'No tab has turned. Yet.'));
     $('stats').replaceChildren(...chips);
   }
 
   const graves = s.graveCount;
-  $('grave-count').textContent = graves ? String(graves) : '';
-  $('graveyard').setAttribute('aria-label', graves ? `Graveyard, ${plural(graves, 'buried tab')}` : 'Graveyard');
-  $<HTMLButtonElement>('exorcise').disabled = !on;
+  setText($('grave-count'), graves ? String(graves) : '');
+  setAttr($('graveyard'), 'aria-label', graves ? `Graveyard, ${plural(graves, 'buried tab')}` : 'Graveyard');
+  exorciseButton.disabled = !on;
 
-  if (on && !s.hostPermission) {
+  if (blocked) {
     say('Haunting needs permission to repaint your tabs.', 'warn', { label: 'Grant access', run: grantAccess });
   } else if (noticeKey.includes('Grant access')) {
     say('');
   }
 
   const t = s.settings.thresholdMinutes;
-  if (thresholdSelect.value !== String(t)) thresholdSelect.value = String(t);
+  if (!pending.has('thresholdMinutes') && thresholdSelect.value !== String(t)) thresholdSelect.value = String(t);
   for (const key of CHECKS) {
     const input = $<HTMLInputElement>(key);
     if (!pending.has(key) && input.checked !== s.settings[key]) input.checked = s.settings[key];
   }
   if (t !== timelineFor) renderTimeline(t);
+}
+
+/** Run the light across the meter a couple of times; it rests afterwards. */
+function shine(): void {
+  meter.classList.remove('shine');
+  void meter.offsetWidth;
+  meter.classList.add('shine');
 }
 
 function renderTimeline(t: number): void {
@@ -149,6 +250,13 @@ function renderTimeline(t: number): void {
 
 // ── Tab list ───────────────────────────────────────────────────────────────
 
+/** A readable place name; the shared siteName turns about:blank into "about://". */
+function siteLabel(url: string): string {
+  if (/^about:/.test(url)) return url.split(/[?#]/)[0];
+  if (/^chrome:\/\/newtab/.test(url)) return 'new tab page';
+  return siteName(url);
+}
+
 interface Group {
   key: string;
   label: string;
@@ -167,7 +275,7 @@ function groupTabs(s: Snapshot, tabs: TabView[]): Group[] {
     groups.get(key)!.tabs.push(tab);
   };
   if (mode === 'domain') {
-    for (const t of tabs) add(`site:${siteName(t.url)}`, () => ({ label: siteName(t.url), icon: { src: faviconUrl(t.url, t.favIconUrl) } }), t);
+    for (const t of tabs) add(`site:${siteLabel(t.url)}`, () => ({ label: siteLabel(t.url), icon: { src: faviconUrl(t.url, t.favIconUrl) } }), t);
     const out = [...groups.values()].sort((a, b) => b.tabs.length - a.tabs.length || a.label.localeCompare(b.label));
     out.forEach((g) => g.tabs.sort((a, b) => b.idleMs - a.idleMs));
     return out;
@@ -200,7 +308,9 @@ function idleText(t: TabView): string {
 
 function decayProgress(t: TabView, on: boolean, thresholdMinutes: number): number {
   if (!on || t.active) return 0;
-  return t.stage === Stage.Entombed ? 1 : stageProgress(t.idleMs, thresholdMinutes);
+  const p = t.stage === Stage.Entombed ? 1 : stageProgress(t.idleMs, thresholdMinutes);
+  // A sliver of arc reads as a glitch, so the ring waits until there is something to show.
+  return p < 0.05 ? 0 : p;
 }
 
 function flag(name: IconName, label: string): HTMLElement {
@@ -220,7 +330,7 @@ function tabRow(t: TabView, on: boolean, thresholdMinutes: number): HTMLElement 
   const meta = el(
     'span',
     { class: 'meta' },
-    el('span', { class: 'site', text: siteName(t.url) }),
+    el('span', { class: 'site', text: siteLabel(t.url) }),
     stage ? el('span', { class: 'chip', text: STAGE_NAMES[stage] }) : null,
     t.pinned ? flag('pin', 'Pinned, never haunted') : null,
     t.audible ? flag('sound', 'Playing sound, never haunted') : null,
@@ -235,19 +345,38 @@ function tabRow(t: TabView, on: boolean, thresholdMinutes: number): HTMLElement 
   );
   const open = el(
     'button',
-    { class: 'open', type: 'button', title: `${t.title}\n${t.url}`, 'data-action': 'switch' },
+    {
+      class: 'open',
+      type: 'button',
+      tabindex: '-1',
+      title: `${t.title}\n${t.url}\n\nEnter switches · → actions · Delete buries`,
+      'aria-keyshortcuts': 'Delete',
+      'data-action': 'switch',
+    },
     fav,
-    el('span', { class: 'info' }, el('span', { class: 'title', text: t.title || siteName(t.url) }), meta),
+    el('span', { class: 'info' }, el('span', { class: 'title', text: t.title || siteLabel(t.url) }), meta),
     idle,
   );
   const discard =
     !t.active && !t.discarded && t.hauntable
-      ? el('button', { class: 'act', type: 'button', title: 'Put to sleep (discard to free memory)', 'aria-label': 'Put to sleep', 'data-action': 'discard' }, icon('moon'))
+      ? el(
+          'button',
+          { class: 'act', type: 'button', tabindex: '-1', title: 'Put to sleep (discard to free memory)', 'aria-label': 'Put to sleep', 'data-action': 'discard' },
+          icon('moon'),
+        )
       : null;
-  const bury = el('button', { class: 'act bury', type: 'button', title: 'Close and bury in the Graveyard', 'aria-label': 'Bury', 'data-action': 'bury' }, icon('shovel'));
+  const bury = el(
+    'button',
+    { class: 'act bury', type: 'button', tabindex: '-1', title: 'Close and bury in the Graveyard (Delete)', 'aria-label': 'Bury', 'data-action': 'bury' },
+    icon('shovel'),
+  );
   const row = el(
     'div',
-    { class: `tab stage-${stage}${t.active ? ' active' : ''}${t.hauntable ? '' : ' untouchable'}`, 'data-id': String(t.id) },
+    {
+      class: `tab stage-${stage}${t.active ? ' active' : ''}${t.hauntable ? '' : ' untouchable'}${discard ? ' two-acts' : ''}`,
+      role: 'listitem',
+      'data-id': String(t.id),
+    },
     open,
     el('span', { class: 'acts' }, discard, bury),
   );
@@ -259,19 +388,23 @@ function groupHead(g: Group): HTMLElement {
   const glyph =
     typeof g.icon === 'string' ? icon(g.icon) : el('img', { src: g.icon.src, alt: '', width: '12', height: '12', class: 'group-fav' });
   return el(
-    'h2',
-    { class: `group${g.tone !== undefined ? ` tone-${g.tone}` : ''}` },
-    el('span', { class: 'group-icon' }, glyph),
-    el('span', { class: 'group-label', text: g.label }),
-    g.tag ? el('span', { class: 'group-tag', text: g.tag }) : null,
-    el('span', { class: 'group-count', text: String(g.tabs.length), 'aria-label': plural(g.tabs.length, 'tab') }),
+    'div',
+    { class: `group${g.tone !== undefined ? ` tone-${g.tone}` : ''}`, role: 'listitem' },
+    el(
+      'h2',
+      { class: 'group-h' },
+      el('span', { class: 'group-icon' }, glyph),
+      el('span', { class: 'group-label', text: g.label }),
+      g.tag ? el('span', { class: 'group-tag', text: g.tag }) : null,
+      el('span', { class: 'group-count' }, String(g.tabs.length), el('span', { class: 'visually-hidden', text: g.tabs.length === 1 ? ' tab' : ' tabs' })),
+    ),
   );
 }
 
 function emptyState(q: string): HTMLElement {
   return el(
     'div',
-    { class: 'empty' },
+    { class: 'empty', role: 'listitem' },
     el('span', { class: 'empty-art' }, icon(q ? 'search' : 'ghost')),
     el('p', { class: 'empty-title', text: q ? 'No tabs answer' : 'Eerily quiet' }),
     el('p', { class: 'empty-line', text: q ? `Nothing here goes by “${q}”. Perhaps it was never here.` : 'No tabs at all. Not even a ghost.' }),
@@ -287,8 +420,13 @@ interface Cached {
 let rows = new Map<number, Cached>();
 let heads = new Map<string, Cached>();
 let painted = false;
+let lastMode = '';
+let lastQuery = '';
+/** The row that holds the list's single Tab stop. */
+let rovingId: string | undefined;
 
 const EASE = 'cubic-bezier(.2,.8,.2,1)';
+const liveRows = () => [...list.querySelectorAll<HTMLElement>('.tab:not(.leaving)')];
 
 /** Keep the idle clocks and decay rings moving without touching the layout. */
 function tick(s: Snapshot, visible: TabView[]): void {
@@ -297,9 +435,21 @@ function tick(s: Snapshot, visible: TabView[]): void {
     const row = rows.get(t.id)?.node;
     if (!row) continue;
     const idle = row.querySelector('[data-idle]');
-    const text = idleText(t);
-    if (idle && idle.textContent !== text) idle.textContent = text;
-    row.style.setProperty('--p', decayProgress(t, on, s.settings.thresholdMinutes).toFixed(3));
+    if (idle) setText(idle, idleText(t));
+    const p = decayProgress(t, on, s.settings.thresholdMinutes).toFixed(3);
+    if (row.style.getPropertyValue('--p') !== p) row.style.setProperty('--p', p);
+  }
+}
+
+/** The list is one Tab stop: only the current row's main button is tabbable. */
+function applyRoving(): void {
+  const all = liveRows();
+  const current = all.find((r) => r.dataset.id === rovingId) ?? all[0];
+  rovingId = current?.dataset.id;
+  for (const r of all) {
+    const open = r.querySelector<HTMLElement>('.open')!;
+    const want = r === current ? 0 : -1;
+    if (open.tabIndex !== want) open.tabIndex = want;
   }
 }
 
@@ -307,8 +457,9 @@ function renderList(s: Snapshot): void {
   const q = searchInput.value.trim().toLowerCase();
   const on = s.settings.enabled;
   const visible = s.tabs.filter((t) => matches(t, q));
+  const mode = groupSelect.value;
   const signature = JSON.stringify([
-    groupSelect.value,
+    mode,
     q,
     on,
     s.focusedWindowId,
@@ -320,17 +471,21 @@ function renderList(s: Snapshot): void {
     return;
   }
   lastSignature = signature;
+  const regrouped = painted && mode !== lastMode;
+  const refiltered = painted && q !== lastQuery;
+  lastMode = mode;
+  lastQuery = q;
 
-  // First: where everything is now, and what had focus.
-  const motion = painted && !calm();
+  const scrollTop = regrouped || refiltered ? 0 : list.scrollTop;
+  // First: where everything is now, and what had focus. A jump in scroll position
+  // would make every row appear to fly, so that case just swaps.
+  const motion = painted && !calm() && !regrouped && scrollTop === list.scrollTop;
   const before = new Map<Element, DOMRect>();
   for (const child of list.children) if (!child.classList.contains('leaving')) before.set(child, child.getBoundingClientRect());
   const focusedEl = document.activeElement as HTMLElement | null;
   const focusedRow = list.contains(focusedEl) ? focusedEl?.closest<HTMLElement>('[data-id]') : null;
-  const focusedId = focusedRow?.dataset.id;
   const focusedAction = focusedEl?.dataset.action ?? 'switch';
-  const focusedIndex = focusedRow ? [...list.querySelectorAll('.tab:not(.leaving)')].indexOf(focusedRow) : -1;
-  const scrollTop = list.scrollTop;
+  const focusedIndex = focusedRow ? liveRows().indexOf(focusedRow) : -1;
 
   // Build the new order, reusing rows that have not changed.
   const nodes: HTMLElement[] = [];
@@ -380,13 +535,14 @@ function renderList(s: Snapshot): void {
     }
   }
   const kept = new Set<Element>(nodes);
-  const leaving = [...before.keys()].filter((n) => !kept.has(n) && !replaced.has(n) && list.contains(n)) as HTMLElement[];
+  const leaving = regrouped ? [] : ([...before.keys()].filter((n) => !kept.has(n) && !replaced.has(n) && list.contains(n)) as HTMLElement[]);
   const leavingRects = new Map(leaving.map((n) => [n, before.get(n)!]));
   rows = nextRows;
   heads = nextHeads;
   tick(s, visible);
 
   // Place: move only what has to move, leaving departing rows to fade out.
+  if (regrouped) for (const old of list.querySelectorAll('.leaving')) old.remove();
   let cursor: ChildNode | null = list.firstChild;
   const skip = () => {
     while (cursor && (cursor as Element).classList?.contains('leaving')) cursor = cursor.nextSibling;
@@ -407,21 +563,37 @@ function renderList(s: Snapshot): void {
   list.scrollTop = scrollTop;
 
   // Keyboard focus survives the reorder; if its row is gone, land on its neighbour.
+  if (focusedRow) {
+    const back =
+      list.querySelector<HTMLElement>(`[data-id="${focusedRow.dataset.id}"]`) ??
+      liveRows()[Math.min(Math.max(0, focusedIndex), liveRows().length - 1)];
+    rovingId = back?.dataset.id;
+  }
+  applyRoving();
   if (focusedRow && !list.contains(document.activeElement)) {
-    const target =
-      list.querySelector<HTMLElement>(`[data-id="${focusedId}"] [data-action="${focusedAction}"]`) ??
-      list.querySelectorAll<HTMLElement>('.tab:not(.leaving) [data-action="switch"]')[Math.max(0, focusedIndex)] ??
-      list.querySelector<HTMLElement>('.tab:not(.leaving):last-of-type [data-action="switch"]');
-    target?.focus({ preventScroll: true });
+    const row = list.querySelector<HTMLElement>(`[data-id="${rovingId}"]`);
+    (row?.querySelector<HTMLElement>(`[data-action="${focusedAction}"]`) ?? row?.querySelector<HTMLElement>('.open'))?.focus({ preventScroll: true });
   }
 
-  // Last, invert, play.
+  if (regrouped) {
+    // A new arrangement: crossfade the whole list rather than sending rows across each other.
+    list.animate(calm() ? [{ opacity: 0 }, { opacity: 1 }] : [{ opacity: 0, transform: 'translateY(4px)' }, { opacity: 1, transform: 'none' }], {
+      duration: 240,
+      easing: EASE,
+    });
+    painted = true;
+    return;
+  }
+
+  // Last, invert, play. Departing rows fade in place first; neighbours close the gap after.
   const listRect = list.getBoundingClientRect();
+  const exits = leaving.length > 0 && leaving.length <= 24 && painted;
   for (const node of leaving) {
-    if (leavingRects.size > 24) break;
+    if (!exits) break;
     const rect = leavingRects.get(node)!;
     node.classList.add('leaving');
     node.removeAttribute('data-id');
+    node.removeAttribute('role');
     node.inert = true;
     node.setAttribute('aria-hidden', 'true');
     node.style.top = `${rect.top - listRect.top - list.clientTop + list.scrollTop}px`;
@@ -430,13 +602,17 @@ function renderList(s: Snapshot): void {
     list.append(node);
     const sinking = node.classList.contains('sinking');
     const frames = calm()
-      ? [{ opacity: 1 }, { opacity: 0 }]
+      ? [{ opacity: sinking ? 0.45 : 1 }, { opacity: 0 }]
       : sinking
-        ? [{ opacity: 1, transform: 'none', filter: 'none' }, { opacity: 0, transform: 'translateY(14px) scale(.96)', filter: 'blur(2px)' }]
-        : [{ opacity: 1, transform: 'none' }, { opacity: 0, transform: 'translateX(-12px)' }];
-    const anim = node.animate(frames, { duration: sinking ? 420 : 220, easing: 'ease-in', fill: 'forwards' });
+        ? [
+            { opacity: 0.45, transform: 'translateY(3px) scale(.99)' },
+            { opacity: 0, transform: 'translateY(14px) scale(.96)' },
+          ]
+        : [{ opacity: 1 }, { opacity: 0 }];
+    const anim = node.animate(frames, { duration: sinking ? 260 : 120, easing: 'ease-in', fill: 'forwards' });
     anim.onfinish = () => node.remove();
   }
+  const settle = exits ? 100 : 0;
 
   let stagger = 0;
   for (const node of nodes) {
@@ -450,7 +626,7 @@ function renderList(s: Snapshot): void {
           fill: 'backwards',
         });
       } else {
-        node.animate(calm() ? [{ opacity: 0 }, { opacity: 1 }] : [{ opacity: 0, transform: 'scale(.98)' }, { opacity: 1, transform: 'none' }], { duration: 260, easing: EASE });
+        node.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 220, delay: settle + 120, easing: EASE, fill: 'backwards' });
       }
       continue;
     }
@@ -464,7 +640,7 @@ function renderList(s: Snapshot): void {
     const now = node.getBoundingClientRect();
     const dy = old.top - now.top;
     if (Math.abs(dy) < 0.5) continue;
-    node.animate([{ transform: `translateY(${dy}px)` }, { transform: 'none' }], { duration: 360, easing: EASE });
+    node.animate([{ transform: `translateY(${dy}px)` }, { transform: 'none' }], { duration: 300, delay: settle, easing: EASE, fill: 'backwards' });
   }
   painted = true;
 }
@@ -478,7 +654,7 @@ function show(s: Snapshot): void {
 
 async function refresh(): Promise<void> {
   try {
-    show(await ask({ type: 'snapshot' }));
+    await load({ type: 'snapshot' });
   } catch (err) {
     say(`The spirits are unreachable: ${(err as Error).message}`, 'warn');
   }
@@ -486,7 +662,23 @@ async function refresh(): Promise<void> {
 
 async function update(settings: Partial<Settings>): Promise<void> {
   lastSignature = '';
-  show(await ask({ type: 'setSettings', settings }));
+  await load({ type: 'setSettings', settings });
+}
+
+/** Save settings, holding the controls steady until the answer is on screen. */
+async function change(settings: Partial<Settings>): Promise<boolean> {
+  const keys = Object.keys(settings);
+  keys.forEach((k) => pending.add(k));
+  try {
+    await update(settings);
+    return true;
+  } catch (err) {
+    say(`That change did not take: ${(err as Error).message}`, 'warn');
+    return false;
+  } finally {
+    keys.forEach((k) => pending.delete(k));
+    if (snap) renderHeader(snap);
+  }
 }
 
 /**
@@ -505,6 +697,11 @@ function requestThen(permissions: chrome.permissions.Permissions, settings: Part
 
 let awakenTimer = 0;
 function awaken(): void {
+  // The light spills out of wherever the switch really is.
+  const track = document.querySelector('.track')!.getBoundingClientRect();
+  const glow = $('awaken');
+  glow.style.setProperty('--ax', `${track.left + track.width / 2}px`);
+  glow.style.setProperty('--ay', `${track.top + track.height / 2}px`);
   body.classList.remove('awakening');
   void body.offsetWidth;
   body.classList.add('awakening');
@@ -529,74 +726,119 @@ function banishRitual(): void {
 
 async function grantAccess(): Promise<void> {
   const granted = await requestThen({ origins: ['<all_urls>'] }, { enabled: true });
-  if (granted) {
+  if (granted && (await change({ enabled: true }))) {
     say('');
-    await update({ enabled: true });
+    awaken();
   }
 }
 
 enabledInput.addEventListener('change', async () => {
-  if (enabledInput.checked) {
-    pending.add('enabled');
-    let granted = false;
-    try {
-      // Requested from the click itself, so the browser shows its permission prompt.
-      granted = await requestThen({ origins: ['<all_urls>'] }, { enabled: true });
-    } finally {
-      pending.delete('enabled');
-    }
+  if (!enabledInput.checked) {
+    await exorcise();
+    return;
+  }
+  pending.add('enabled');
+  try {
+    // Requested from the click itself, so the browser shows its permission prompt.
+    const granted = await requestThen({ origins: ['<all_urls>'] }, { enabled: true });
     if (!granted) {
       enabledInput.checked = false;
       say('Without permission to repaint tabs, the spirits cannot cross over. Haunting stays off.', 'warn');
       return;
     }
     say('');
-    await update({ enabled: true });
-    awaken();
-  } else {
-    await exorcise();
+    if (await change({ enabled: true })) awaken();
+  } catch (err) {
+    enabledInput.checked = false;
+    say(`The spirits did not stir: ${(err as Error).message}`, 'warn');
+  } finally {
+    pending.delete('enabled');
+    if (snap) renderHeader(snap);
   }
 });
 
 async function exorcise(): Promise<void> {
+  // The Exorcise button disables itself; keep keyboard focus somewhere useful.
+  const fromButton = document.activeElement === exorciseButton;
   banishRitual();
   lastSignature = '';
   say('');
-  show(await ask({ type: 'exorcise' }));
-  announce('Every tab is restored and haunting is off.');
+  try {
+    await load({ type: 'exorcise' });
+    announce('Every tab is restored and haunting is off.');
+  } catch (err) {
+    say(`The exorcism faltered: ${(err as Error).message}`, 'warn');
+  }
+  if (fromButton) enabledInput.focus();
 }
 
-$('exorcise').addEventListener('click', exorcise);
+exorciseButton.addEventListener('click', exorcise);
 $('graveyard').addEventListener('click', () => openGraveyard().then(() => window.close()));
 
-// ── Settings sheet ─────────────────────────────────────────────────────────
+$('intro-dismiss').addEventListener('click', () => {
+  store.set('introDismissed', '1');
+  if (snap) renderHeader(snap);
+  $('intro-show').focus();
+});
+$('intro-show').addEventListener('click', () => {
+  store.set('introDismissed', '0');
+  if (snap) renderHeader(snap);
+  $('intro-dismiss').focus();
+});
+
+// ── Settings sheet (modal) ─────────────────────────────────────────────────
 
 let sheetTimer = 0;
 function openSettings(): void {
   clearTimeout(sheetTimer);
   sheet.hidden = false;
+  scrim.hidden = false;
   void sheet.offsetWidth;
   sheet.classList.add('is-open');
+  scrim.classList.add('is-open');
   content.inert = true;
+  header.inert = true;
   settingsToggle.setAttribute('aria-expanded', 'true');
   $('settings-close').focus({ preventScroll: true });
 }
 
 function closeSettings(): void {
-  if (sheet.hidden) return;
+  if (sheet.hidden || !sheet.classList.contains('is-open')) return;
   sheet.classList.remove('is-open');
+  scrim.classList.remove('is-open');
   content.inert = false;
+  header.inert = false;
   settingsToggle.setAttribute('aria-expanded', 'false');
   settingsToggle.focus({ preventScroll: true });
-  sheetTimer = window.setTimeout(() => (sheet.hidden = true), calm() ? 0 : 280);
+  sheetTimer = window.setTimeout(
+    () => {
+      sheet.hidden = true;
+      scrim.hidden = true;
+    },
+    calm() ? 200 : 320,
+  );
 }
 
 settingsToggle.addEventListener('click', () => (sheet.hidden ? openSettings() : closeSettings()));
 $('settings-close').addEventListener('click', closeSettings);
-document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && !sheet.hidden) {
+scrim.addEventListener('click', closeSettings);
+sheet.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
     e.preventDefault();
     closeSettings();
+    return;
+  }
+  if (e.key !== 'Tab') return;
+  // Keep Tab inside the sheet while it is open.
+  const stops = [...sheet.querySelectorAll<HTMLElement>('button, select, input')].filter((n) => !n.closest('[hidden]'));
+  const first = stops[0];
+  const last = stops[stops.length - 1];
+  if (e.shiftKey && document.activeElement === first) {
+    e.preventDefault();
+    last.focus();
+  } else if (!e.shiftKey && document.activeElement === last) {
+    e.preventDefault();
+    first.focus();
   }
 });
 
@@ -610,7 +852,7 @@ for (const opt of document.querySelectorAll<HTMLLabelElement>('.opt')) {
   input.setAttribute('aria-describedby', desc.id);
 }
 
-thresholdSelect.addEventListener('change', () => update({ thresholdMinutes: Number(thresholdSelect.value) }));
+thresholdSelect.addEventListener('change', () => change({ thresholdMinutes: Number(thresholdSelect.value) }));
 
 for (const key of CHECKS) {
   const input = $<HTMLInputElement>(key);
@@ -620,6 +862,8 @@ for (const key of CHECKS) {
       let granted = false;
       try {
         granted = await requestThen({ permissions: ['notifications'] }, { whispers: true });
+      } catch {
+        granted = false;
       } finally {
         pending.delete(key);
       }
@@ -628,19 +872,35 @@ for (const key of CHECKS) {
         return;
       }
     }
-    await update({ [key]: input.checked });
+    await change({ [key]: input.checked });
   });
 }
 
 // ── Search, grouping and keyboard ──────────────────────────────────────────
 
-const firstRow = () => list.querySelector<HTMLElement>('.tab:not(.leaving) [data-action="switch"]');
+function syncSearch(): void {
+  searchClear.hidden = !searchInput.value;
+  if (snap) renderList(snap);
+}
 
-searchInput.addEventListener('input', () => snap && renderList(snap));
+const focusRow = (row: HTMLElement | undefined) => row?.querySelector<HTMLElement>('.open')?.focus();
+
+searchInput.addEventListener('input', syncSearch);
+searchClear.addEventListener('click', () => {
+  searchInput.value = '';
+  syncSearch();
+  searchInput.focus();
+});
 searchInput.addEventListener('keydown', (e) => {
   if (e.key === 'ArrowDown') {
     e.preventDefault();
-    firstRow()?.focus();
+    focusRow(liveRows()[0]);
+    return;
+  }
+  if (e.key === 'Escape' && searchInput.value) {
+    e.preventDefault();
+    searchInput.value = '';
+    syncSearch();
     return;
   }
   if (e.key !== 'Enter') return;
@@ -648,48 +908,85 @@ searchInput.addEventListener('keydown', (e) => {
   if (first) ask({ type: 'switch', tabId: Number(first.dataset.id) }).then(() => window.close());
 });
 groupSelect.addEventListener('change', () => {
-  try {
-    localStorage.setItem('group', groupSelect.value);
-  } catch {
-    // Not remembered this time; harmless.
-  }
+  store.set('group', groupSelect.value);
   if (snap) renderList(snap);
 });
-try {
-  groupSelect.value = localStorage.getItem('group') ?? 'window';
-} catch {
-  // Storage unavailable; keep the default grouping.
-}
+groupSelect.value = store.get('group') ?? 'window';
+if (!groupSelect.value) groupSelect.value = 'window';
 
-list.addEventListener('keydown', (e) => {
-  if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
-  const opens = [...list.querySelectorAll<HTMLElement>('.tab:not(.leaving) [data-action="switch"]')];
-  const current = (e.target as HTMLElement).closest('.tab')?.querySelector<HTMLElement>('[data-action="switch"]');
-  const i = current ? opens.indexOf(current) : -1;
-  e.preventDefault();
-  const next = i + (e.key === 'ArrowDown' ? 1 : -1);
-  if (next < 0) searchInput.focus();
-  else opens[Math.min(next, opens.length - 1)]?.focus();
+list.addEventListener('focusin', (e) => {
+  const row = (e.target as HTMLElement).closest<HTMLElement>('.tab:not(.leaving)');
+  if (row && row.dataset.id !== rovingId) {
+    rovingId = row.dataset.id;
+    applyRoving();
+  }
 });
 
-list.addEventListener('click', async (e) => {
+list.addEventListener('keydown', (e) => {
+  const target = e.target as HTMLElement;
+  const row = target.closest<HTMLElement>('.tab:not(.leaving)');
+  if (!row) return;
+  const all = liveRows();
+  const i = all.indexOf(row);
+  const controls = [row.querySelector<HTMLElement>('.open')!, ...row.querySelectorAll<HTMLElement>('.act')];
+  const at = controls.indexOf(target);
+  switch (e.key) {
+    case 'ArrowDown':
+      focusRow(all[Math.min(i + 1, all.length - 1)]);
+      break;
+    case 'ArrowUp':
+      if (i === 0) searchInput.focus();
+      else focusRow(all[i - 1]);
+      break;
+    case 'Home':
+      focusRow(all[0]);
+      break;
+    case 'End':
+      focusRow(all[all.length - 1]);
+      break;
+    case 'ArrowRight':
+      controls[Math.min(at + 1, controls.length - 1)]?.focus();
+      break;
+    case 'ArrowLeft':
+      controls[Math.max(at - 1, 0)]?.focus();
+      break;
+    case 'Delete':
+    case 'Backspace':
+      void act(row, 'bury');
+      break;
+    default:
+      return;
+  }
+  e.preventDefault();
+});
+
+async function act(row: HTMLElement, action: string | undefined): Promise<void> {
+  const tabId = Number(row.dataset.id);
+  if (Number.isNaN(tabId)) return;
+  try {
+    if (action === 'switch') {
+      await ask({ type: 'switch', tabId });
+      window.close();
+    } else if (action === 'bury') {
+      // Feedback right away; the row sinks out once the tab is really closed.
+      row.classList.add('sinking');
+      await ask({ type: 'bury', tabId });
+      await refresh();
+    } else if (action === 'discard') {
+      const res = await ask<{ ok: boolean; reason?: string }>({ type: 'discard', tabId });
+      if (!res.ok && res.reason) say(res.reason, 'warn');
+      await refresh();
+    }
+  } catch (err) {
+    row.classList.remove('sinking');
+    say(`The spirits refused: ${(err as Error).message}`, 'warn');
+  }
+}
+
+list.addEventListener('click', (e) => {
   const button = (e.target as HTMLElement).closest<HTMLElement>('[data-action]');
   const row = button?.closest<HTMLElement>('[data-id]');
-  if (!button || !row) return;
-  const tabId = Number(row.dataset.id);
-  const action = button.dataset.action;
-  if (action === 'switch') {
-    await ask({ type: 'switch', tabId });
-    window.close();
-  } else if (action === 'bury') {
-    row.classList.add('sinking');
-    await ask({ type: 'bury', tabId });
-    await refresh();
-  } else if (action === 'discard') {
-    const res = await ask<{ ok: boolean; reason?: string }>({ type: 'discard', tabId });
-    if (!res.ok && res.reason) say(res.reason, 'warn');
-    await refresh();
-  }
+  if (button && row) void act(row, button.dataset.action);
 });
 
 refresh();

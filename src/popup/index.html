@@ -28,46 +28,48 @@
           </svg>
           <div class="brand-text">
             <h1>Haunted Tabs</h1>
-            <p id="summary" class="summary">Counting your tabs…</p>
+            <p id="level-blurb" class="summary">Counting your tabs…</p>
           </div>
         </div>
-        <label class="switch" title="Haunting is off until you turn it on">
+        <label class="switch" id="switch" title="Wake the spirits">
           <span id="enabled-label" class="switch-label">Dormant</span>
           <input type="checkbox" id="enabled" role="switch" aria-label="Haunting" aria-describedby="enabled-label" />
           <span class="track" aria-hidden="true"><span class="thumb"></span></span>
         </label>
       </header>
 
-      <div id="content" class="content">
-        <section class="level card" aria-live="polite" aria-labelledby="level-caption">
-          <div class="level-head">
-            <span id="level-caption" class="caption">Haunt level</span>
-            <span id="pips" class="pips" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
-          </div>
-          <div class="level-title">
-            <strong id="level-name" class="level-name">Peaceful</strong>
-            <span id="level-blurb" class="blurb">Your tabs rest easy.</span>
-          </div>
+      <main id="content" class="content">
+        <section id="level" class="level card" aria-label="Haunt level">
+          <strong id="level-name" class="level-name">Peaceful</strong>
           <div class="meter" role="meter" id="meter" aria-label="Haunt level" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
-            <div id="meter-fill" class="meter-fill"><span class="meter-ember"></span></div>
+            <span class="meter-glow"></span>
+            <span id="meter-fill" class="meter-fill"><span class="meter-shine"></span></span>
+            <span class="meter-ember"></span>
           </div>
           <div id="stats" class="stats"></div>
         </section>
 
-        <section id="intro" class="intro card" hidden>
+        <section id="intro" class="intro card" aria-labelledby="intro-title" hidden>
           <div class="intro-head">
             <span class="intro-mark" data-icon="moon"></span>
-            <div>
-              <h2>The spirits are sleeping</h2>
+            <div class="intro-copy">
+              <h2 id="intro-title">The spirits are sleeping</h2>
               <p>Wake them with the switch, and tabs you leave alone too long begin to <em>decay</em>.</p>
             </div>
+            <button id="intro-dismiss" class="ghost-btn small" type="button" aria-label="Hide this introduction" title="Hide"><span data-icon="close"></span></button>
           </div>
           <ol class="intro-steps" aria-label="How tabs decay">
             <li class="s1"><span data-icon="wither"></span>Titles rot</li>
             <li class="s2"><span data-icon="ghost"></span>Icons fade</li>
             <li class="s3"><span data-icon="skull"></span>The dead return</li>
           </ol>
-          <p class="fine">Nothing is ever deleted. Pinned, playing and unsaved tabs are never touched, and Exorcise restores everything at once.</p>
+          <p class="fine">Nothing is ever deleted. Pinned, playing and unsaved tabs are left alone, and Exorcise restores everything.</p>
+        </section>
+
+        <section id="sleep" class="sleep card" aria-label="Haunting is dormant" hidden>
+          <span class="sleep-mark" data-icon="moon"></span>
+          <p><strong>Dormant.</strong> Nothing is touched until you wake the spirits.</p>
+          <button id="intro-show" class="text-btn" type="button">How it works</button>
         </section>
 
         <div id="notice" class="notice" role="status" hidden></div>
@@ -76,6 +78,7 @@
           <label class="search">
             <span class="search-icon" data-icon="search"></span>
             <input type="search" id="search" placeholder="Search tabs" aria-label="Search tabs" autocomplete="off" spellcheck="false" />
+            <button id="search-clear" class="search-clear" type="button" aria-label="Clear search" title="Clear (Esc)" hidden><span data-icon="close"></span></button>
           </label>
           <label class="select group-select">
             <span class="visually-hidden">Group tabs</span>
@@ -87,10 +90,11 @@
           </label>
         </div>
 
-        <main id="list" class="list" aria-label="Open tabs"></main>
+        <p id="list-help" class="visually-hidden">Up and down arrows move between tabs. Enter switches to a tab. Right arrow reaches its actions. Delete buries it.</p>
+        <div id="list" class="list" role="list" aria-label="Open tabs" aria-describedby="list-help"></div>
 
         <footer class="bottom">
-          <button id="settings-toggle" class="btn icon-btn" type="button" aria-label="Settings" aria-expanded="false" aria-controls="settings" title="Settings">
+          <button id="settings-toggle" class="btn icon-btn" type="button" aria-label="Settings" aria-haspopup="dialog" aria-expanded="false" aria-controls="settings" title="Settings">
             <span data-icon="sliders"></span>
           </button>
           <button id="graveyard" class="btn" type="button">
@@ -100,9 +104,10 @@
             <span data-icon="cross"></span><span class="btn-label">Exorcise</span>
           </button>
         </footer>
-      </div>
+      </main>
 
-      <section id="settings" class="sheet" role="dialog" aria-labelledby="settings-title" hidden>
+      <div id="scrim" class="scrim" hidden></div>
+      <section id="settings" class="sheet" role="dialog" aria-modal="true" aria-labelledby="settings-title" hidden>
         <div class="sheet-head">
           <h2 id="settings-title">Settings</h2>
           <button id="settings-close" class="icon-btn ghost-btn" type="button" aria-label="Close settings" title="Close (Esc)">
