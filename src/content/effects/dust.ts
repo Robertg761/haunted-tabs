@@ -14,9 +14,12 @@
 // the intro and a few seconds of stillness the motes settle out of the air and the animation loop
 // stops completely, leaving a static aged page. Moving the mouse kicks the dust back up for a
 // while; scrolling and moving also wear the whole effect away. Total animated time is capped.
+// Other effects (fog, eyes, cobwebs) animate above dust all the time, which would keep the blend
+// layers re-blending however still the dust is. So while any other effect shares the page, dust
+// crossfades to a plain tint and vignette with ordinary compositing, and back when it is alone.
 
 import type { Effect, EffectContext } from './types';
-import { createOverlay, seeded, Z, type Overlay } from './overlay';
+import { createOverlay, OUR_ATTR, seeded, Z, type Overlay } from './overlay';
 
 interface Mote {
   x: number;
@@ -67,6 +70,8 @@ const RISE_MS = 600;
 const GATE_OUT_MS = 450;
 const GATE_REST_MS = 2500;
 const GATE_IN_MS = 3000;
+/** Crossfade between the blend look (alone) and the plain look (other effects present). */
+const COMPANY_FADE_MS = 600;
 /** Total time the dust may spend animating while visible; after that the page only stays aged. */
 const ANIM_BUDGET_MS = 120_000;
 /** A hidden tab is not being welcomed back: let go of everything after this long. */
@@ -151,6 +156,8 @@ const CSS = `
   .fx { position: fixed; inset: 0; pointer-events: none; overflow: hidden; z-index: ${Z.dust}; opacity: 0; }
   .tone { mix-blend-mode: color; background: rgb(168, 128, 78); }
   .paper.light { mix-blend-mode: multiply; background: rgb(250, 240, 218); }
+  /* Plain compositing lifts dark text as well as tinting the page, so the middle stays clear. */
+  .flat { background: radial-gradient(ellipse 74% 70% at 50% 47%, rgba(236,214,172,0) 45%, rgba(214,176,120,.11) 76%, rgba(160,116,66,.24) 100%); }
   .vig { position: absolute; inset: -14%;
     background: radial-gradient(ellipse 72% 68% at 50% 47%, rgba(255,255,255,0) 38%, rgba(226,196,148,.5) 70%, rgba(170,124,70,.92) 100%); }
   .dark .vig { background: radial-gradient(ellipse 72% 68% at 50% 47%, rgba(16,10,4,0) 62%, rgba(18,11,4,.14) 80%, rgba(8,5,2,.3) 100%); }
@@ -240,7 +247,14 @@ export class Dust implements Effect {
   private asleep = false;
   /** Scroll gate for the blend layers (0 stepped aside .. 1 fully present). */
   private gate = 1;
-  private gateHidden = false;
+  private blendHidden = false;
+  /** Plain stand-in for the blend layers while other effects share the page (light pages only). */
+  private flat: HTMLDivElement | null = null;
+  private flatHidden = false;
+  /** 1: the full blend look (dust alone); 0: the plain look (company). */
+  private mix = 1;
+  private company = false;
+  private hostObserver: MutationObserver | null = null;
   private lastScrollAt = -Infinity;
   private restTimer: number | undefined;
 
@@ -315,7 +329,8 @@ export class Dust implements Effect {
     this.animMs = 0;
     this.asleep = false;
     this.gate = 1;
-    this.gateHidden = false;
+    this.blendHidden = false;
+    this.flatHidden = false;
     this.lastScrollAt = -Infinity;
     this.stopping = false;
     this.dissolving = false;
@@ -350,6 +365,8 @@ export class Dust implements Effect {
     if (this.raf) cancelAnimationFrame(this.raf);
     this.raf = 0;
     this.listen(false);
+    this.hostObserver?.disconnect();
+    this.hostObserver = null;
     // Let go of the bitmaps right away rather than waiting for the collector.
     if (this.canvas) this.canvas.width = this.canvas.height = 0;
     if (this.grain) this.grain.width = this.grain.height = 0;
@@ -357,7 +374,7 @@ export class Dust implements Effect {
     this.overlay = null;
     this.canvas = this.ctx = null;
     this.canvasLive = false;
-    this.tone = this.paper = this.vig = this.haze = this.beam = null;
+    this.tone = this.paper = this.vig = this.haze = this.beam = this.flat = null;
     this.grain = this.grainTile = this.scratchSprite = this.glintSprite = null;
     this.sprites = [];
     this.motes = [];
@@ -384,9 +401,21 @@ export class Dust implements Effect {
     tone.className = 'fx tone';
     const paper = document.createElement('div');
     paper.className = `fx paper ${this.dark ? 'dark' : 'light'}`;
-    for (const el of [tone, paper]) overlay.root.insertBefore(el, overlay.layer);
+    const layers: HTMLElement[] = [tone, paper];
+    if (!this.dark) {
+      const flat = document.createElement('div');
+      flat.className = 'fx flat';
+      layers.push(flat);
+      this.flat = flat;
+    }
+    for (const el of layers) overlay.root.insertBefore(el, overlay.layer);
     this.tone = tone;
     this.paper = paper;
+    // Watch for other effects arriving or leaving: their hosts are direct children of <html>.
+    this.hostObserver = new MutationObserver(this.onHosts);
+    this.hostObserver.observe(document.documentElement, { childList: true });
+    this.company = this.hasCompany();
+    this.mix = this.company ? 0 : 1;
     this.vig = div('vig', paper);
     if (this.dark) this.haze = div('haze', paper);
 
@@ -617,6 +646,21 @@ export class Dust implements Effect {
     d('play', this.onPlay, opts);
   }
 
+  private hasCompany(): boolean {
+    const own = this.overlay?.host;
+    for (const el of Array.from(document.documentElement.children)) {
+      if (el !== own && el.tagName === 'DIV' && el.hasAttribute(OUR_ATTR)) return true;
+    }
+    return false;
+  }
+
+  private onHosts = (): void => {
+    const company = this.hasCompany();
+    if (company === this.company) return;
+    this.company = company;
+    this.wake();
+  };
+
   private onPointer = (e: PointerEvent): void => {
     const x = e.clientX;
     const y = e.clientY;
@@ -788,6 +832,7 @@ export class Dust implements Effect {
     this.readScroll();
     const resting = now - this.lastScrollAt > GATE_REST_MS;
     this.gate = resting ? Math.min(1, this.gate + dms / GATE_IN_MS) : Math.max(0, this.gate - dms / GATE_OUT_MS);
+    this.mix = this.company ? Math.max(0, this.mix - dms / COMPANY_FADE_MS) : Math.min(1, this.mix + dms / COMPANY_FADE_MS);
 
     // Overall envelope: ease in, wear down with interaction, settle back when left alone, fade out on stop.
     this.intro = Math.min(1, this.intro + dms / (this.reduced ? INTRO_MS * 1.4 : INTRO_MS));
@@ -836,6 +881,7 @@ export class Dust implements Effect {
       !this.dissolving &&
       this.fade >= 1 &&
       (this.gate >= 1 || (this.gate <= 0 && !resting)) &&
+      this.mix === (this.company ? 0 : 1) &&
       Math.abs(target - this.shown) < 0.01;
     if (settled) {
       if (this.gate <= 0) {
@@ -894,14 +940,27 @@ export class Dust implements Effect {
   /** The blend layers. They only change while the effect arrives, wears, creeps back or leaves. */
   private paintLayers(amount: number): void {
     const s = this.stage;
-    const gated = amount * smooth(this.gate);
-    this.setOpacity(this.tone, STAGE_TONE[s] * gated);
-    this.setOpacity(this.paper, (this.dark ? STAGE_PAPER_DARK : STAGE_PAPER_LIGHT)[s] * gated);
+    // The blend layers: colour wash, and on light pages the multiply paper. They step aside for
+    // scrolling and for company. Dark pages' paper is plain compositing and needs neither.
+    const blend = smooth(this.gate) * smooth(this.mix);
+    this.setOpacity(this.tone, STAGE_TONE[s] * amount * blend);
+    if (this.dark) this.setOpacity(this.paper, STAGE_PAPER_DARK[s] * amount);
+    else this.setOpacity(this.paper, STAGE_PAPER_LIGHT[s] * amount * blend);
     // Fully stepped aside: take them out of compositing altogether.
-    const hide = this.gate <= 0;
-    if (hide !== this.gateHidden && this.tone && this.paper) {
-      this.gateHidden = hide;
-      this.tone.style.visibility = this.paper.style.visibility = hide ? 'hidden' : '';
+    const hide = blend <= 0;
+    if (hide !== this.blendHidden && this.tone && this.paper) {
+      this.blendHidden = hide;
+      this.tone.style.visibility = hide ? 'hidden' : '';
+      if (!this.dark) this.paper.style.visibility = hide ? 'hidden' : '';
+    }
+    if (this.flat) {
+      const plain = 1 - smooth(this.mix);
+      this.setOpacity(this.flat, STAGE_PAPER_LIGHT[s] * amount * plain);
+      const flatHide = plain <= 0;
+      if (flatHide !== this.flatHidden) {
+        this.flatHidden = flatHide;
+        this.flat.style.visibility = flatHide ? 'hidden' : '';
+      }
     }
     if (this.vig) {
       // The browning creeps in from the edges as it arrives.
