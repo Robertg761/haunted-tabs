@@ -3,24 +3,124 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
     <title>The Graveyard</title>
     <link rel="icon" href="../icons/icon32.png" />
     <link rel="stylesheet" href="./graveyard.css" />
   </head>
   <body>
-    <div class="fog" aria-hidden="true"></div>
-    <header class="head">
-      <div>
-        <h1>🪦 The Graveyard</h1>
-        <p id="summary" class="summary">Every tab the haunting took lies here. Nothing is ever lost.</p>
+    <div class="scene" aria-hidden="true">
+      <div class="sky"></div>
+      <div class="layer starfield" data-depth="0.03"><canvas class="stars"></canvas><div class="twinkles"></div></div>
+      <div class="layer moon-layer" data-depth="0.06">
+        <div class="moon"><div class="halo"></div><div class="disc"></div></div>
+        <div class="cloud one"></div>
+        <div class="cloud two"></div>
       </div>
-      <div class="controls">
-        <input type="search" id="search" placeholder="Search the graves…" aria-label="Search the graves" autocomplete="off" />
-        <button id="resurrect-all" class="btn raise">✨ Resurrect all</button>
+      <div class="bats"></div>
+      <div class="layer hills" data-depth="0.12"><svg id="hills-far"></svg></div>
+      <div class="layer hills" data-depth="0.2"><svg id="hills-mid"></svg></div>
+      <div class="layer fog-layer back" data-depth="0.26"><canvas class="fog" data-height="260"></canvas></div>
+      <div class="layer hills" data-depth="0.34"><svg id="hills-near"></svg></div>
+      <div class="wisps"><i></i><i></i><i></i><i></i></div>
+    </div>
+
+    <header class="head">
+      <svg class="crest" viewBox="0 0 120 28" aria-hidden="true">
+        <path d="M60 2v24M53 9h14" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" />
+        <path d="M2 17h36l6-3 6 3h0M118 17H82l-6-3-6 3" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" opacity=".7" />
+        <circle cx="44" cy="17" r="1.6" fill="currentColor" /><circle cx="76" cy="17" r="1.6" fill="currentColor" />
+      </svg>
+      <h1 class="title">The Graveyard</h1>
+      <p id="summary" class="summary">Every tab the haunting takes will lie here. Nothing is ever lost.</p>
+      <dl class="tally">
+        <div><dt>Souls at rest</dt><dd id="count-all">0</dd></div>
+        <div><dt>Taken by the haunting</dt><dd id="count-haunting">0</dd></div>
+        <div><dt>Laid down by you</dt><dd id="count-you">0</dd></div>
+      </dl>
+      <div class="controls" role="search">
+        <label class="search">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5" fill="none" stroke="currentColor" stroke-width="1.6" /><path d="M12.6 12.6l4.4 4.4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" /></svg>
+          <input type="search" id="search" placeholder="Search the graves…" aria-label="Search the graves" autocomplete="off" spellcheck="false" />
+          <kbd aria-hidden="true">/</kbd>
+        </label>
+        <button id="resurrect-all" class="btn spectral" type="button">
+          <svg class="spark" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.5l1.3 4.2L13.5 7 9.3 8.3 8 12.5 6.7 8.3 2.5 7l4.2-1.3z" fill="currentColor" /><circle cx="13" cy="12.5" r="1.1" fill="currentColor" /><circle cx="3.2" cy="2.8" r=".8" fill="currentColor" /></svg>
+          <span class="label">Resurrect all</span>
+        </button>
       </div>
     </header>
-    <main id="graves" class="graves" aria-live="polite"></main>
-    <footer class="ground" aria-hidden="true"></footer>
+
+    <main class="yard-wrap">
+      <div id="graves" class="yard"></div>
+      <section id="empty" class="empty" hidden>
+        <div class="empty-plot"></div>
+        <p class="empty-title">No one is buried here. Yet.</p>
+        <p class="empty-note">When the haunting takes a tab, or you lay one down, it will rest here &mdash; and can always be raised again.</p>
+      </section>
+      <section id="no-match" class="no-match" hidden>
+        <p class="empty-title">No grave bears that name.</p>
+        <button type="button" class="btn ghostly" id="clear-search">Clear the search</button>
+      </section>
+    </main>
+    <p id="status" class="sr-only" aria-live="polite"></p>
+
+    <footer class="foot">Nothing buried here is ever truly lost.</footer>
+
+    <div class="fog-front" aria-hidden="true"><canvas class="fog" data-height="220"></canvas></div>
+    <div class="vignette" aria-hidden="true"></div>
+    <canvas class="spirits" aria-hidden="true"></canvas>
+
+    <svg class="defs" width="0" height="0" aria-hidden="true" focusable="false">
+      <defs>
+        <linearGradient id="mat-granite" x1="1" y1="0" x2=".2" y2="1">
+          <stop offset="0" stop-color="#9da3af" /><stop offset=".55" stop-color="#868c97" /><stop offset="1" stop-color="#7c828e" />
+        </linearGradient>
+        <linearGradient id="mat-limestone" x1="1" y1="0" x2=".2" y2="1">
+          <stop offset="0" stop-color="#b0a48c" /><stop offset=".55" stop-color="#968b76" /><stop offset="1" stop-color="#8a806c" />
+        </linearGradient>
+        <linearGradient id="mat-slate" x1="1" y1="0" x2=".2" y2="1">
+          <stop offset="0" stop-color="#93a0b6" /><stop offset=".55" stop-color="#7f8a9d" /><stop offset="1" stop-color="#788395" />
+        </linearGradient>
+        <linearGradient id="mat-marble" x1="1" y1="0" x2=".2" y2="1">
+          <stop offset="0" stop-color="#bcbbc1" /><stop offset=".55" stop-color="#a09fa7" /><stop offset="1" stop-color="#93929a" />
+        </linearGradient>
+        <radialGradient id="moonlit" cx=".88" cy="-.05" r="1.05">
+          <stop offset="0" stop-color="#eef2ff" stop-opacity=".26" /><stop offset=".5" stop-color="#e6ebff" stop-opacity=".08" /><stop offset="1" stop-color="#e6ebff" stop-opacity="0" />
+        </radialGradient>
+        <linearGradient id="damp" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stop-color="#1c2418" stop-opacity="0" /><stop offset=".6" stop-color="#1c2418" stop-opacity=".06" /><stop offset="1" stop-color="#1c2418" stop-opacity=".3" />
+        </linearGradient>
+        <radialGradient id="moss" cx=".45" cy=".35" r=".7">
+          <stop offset="0" stop-color="#5d7a3c" /><stop offset=".55" stop-color="#455d2d" /><stop offset="1" stop-color="#34492a" stop-opacity=".85" />
+        </radialGradient>
+        <radialGradient id="candlelight-r" cx="1.02" cy=".97" r=".9">
+          <stop offset="0" stop-color="#ffb862" stop-opacity=".62" /><stop offset=".4" stop-color="#ff9c4c" stop-opacity=".24" /><stop offset="1" stop-color="#ff9a4a" stop-opacity="0" />
+        </radialGradient>
+        <radialGradient id="candlelight-l" href="#candlelight-r" cx="-.02" />
+        <radialGradient id="edge-shade" cx=".56" cy=".42" r=".72">
+          <stop offset=".55" stop-color="#000" stop-opacity="0" /><stop offset="1" stop-color="#05060a" stop-opacity=".26" />
+        </radialGradient>
+        <linearGradient id="streak" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stop-color="#20242c" stop-opacity=".34" /><stop offset="1" stop-color="#20242c" stop-opacity="0" />
+        </linearGradient>
+        <radialGradient id="spirit" cx=".5" cy=".45" r=".75">
+          <stop offset="0" stop-color="#e6fff3" stop-opacity=".7" /><stop offset=".6" stop-color="#b8ffe0" stop-opacity=".3" /><stop offset="1" stop-color="#9ff5d4" stop-opacity=".1" />
+        </radialGradient>
+        <radialGradient id="candleground" cx=".5" cy=".5" r=".5">
+          <stop offset="0" stop-color="#ffaa55" stop-opacity=".45" /><stop offset="1" stop-color="#ffaa55" stop-opacity="0" />
+        </radialGradient>
+        <linearGradient id="earth" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stop-color="#4a3a2c" /><stop offset=".35" stop-color="#2c2219" /><stop offset=".8" stop-color="#16110d" stop-opacity=".9" /><stop offset="1" stop-color="#0d0a08" stop-opacity="0" />
+        </linearGradient>
+        <radialGradient id="turf" cx=".5" cy=".5" r=".5">
+          <stop offset="0" stop-color="#1b1712" stop-opacity=".95" /><stop offset=".6" stop-color="#14110d" stop-opacity=".6" /><stop offset="1" stop-color="#0e0c0a" stop-opacity="0" />
+        </radialGradient>
+        <pattern id="grain" patternUnits="userSpaceOnUse" width="180" height="180"><image width="180" height="180" /></pattern>
+        <pattern id="mottle" patternUnits="userSpaceOnUse" width="420" height="420"><image width="420" height="420" /></pattern>
+      </defs>
+    </svg>
+
     <script type="module" src="./graveyard.ts"></script>
   </body>
 </html>
