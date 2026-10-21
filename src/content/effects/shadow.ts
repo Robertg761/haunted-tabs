@@ -109,6 +109,10 @@ function pageIsLight(): boolean {
   let total = 0;
   let weight = 0;
   let sawImage = false;
+  // The text in front decides it when the backdrop is a picture: `multiply` would
+  // grey out white headlines on a colourful hero, and `lighten` keeps them white.
+  let lightText = 0;
+  let texts = 0;
   const w = innerWidth;
   const h = innerHeight;
   // Mostly the band where the head and shoulders pass, a little lower down.
@@ -117,6 +121,11 @@ function pageIsLight(): boolean {
   for (let r = 0; r < rows.length; r++) {
     for (const fx of [0.2, 0.5, 0.8]) {
       let el: Element | null = document.elementFromPoint(w * fx, h * rows[r]);
+      const ink = el ? rgba(getComputedStyle(el).color) : null;
+      if (ink && ink[3] > 128) {
+        texts++;
+        if (luminance(ink[0], ink[1], ink[2]) > 0.45) lightText++;
+      }
       while (el) {
         const cs = getComputedStyle(el);
         // An image or gradient could be any colour: this sample says nothing.
@@ -136,8 +145,9 @@ function pageIsLight(): boolean {
   }
   if (weight > 0.5) return total / weight > 0.3;
   // Only images behind it: `multiply` shows on light and mid-tone images and
-  // simply fades away on very dark ones, which is the safer way to be wrong.
-  if (sawImage) return true;
+  // simply fades away on very dark ones, which is the safer way to be wrong,
+  // unless the text over them is light.
+  if (sawImage) return lightText * 2 <= texts;
   // Nothing painted at all. Light text means a dark page, and dark text a light one.
   const text = document.body ? rgba(getComputedStyle(document.body).color) : null;
   if (text && text[3] > 128) return luminance(text[0], text[1], text[2]) < 0.4;
@@ -259,8 +269,21 @@ export class Shadow implements Effect {
   }
 
   start(ctx: EffectContext): void {
-    // A one-shot: while it is already waiting or walking, a second call changes nothing.
-    if (this.phase !== 'idle') return;
+    // A one-shot: while it is already waiting or walking, a second call changes
+    // nothing, except that it takes back a stop: the figure fades in again from
+    // wherever the fade-out had got to, and walks on.
+    if (this.phase !== 'idle') {
+      if (this.stopAt >= 0) {
+        const left = 1 - smooth(0, STOP_FADE, this.t - this.stopAt);
+        this.stopAt = -1;
+        clearTimeout(this.killTimer);
+        this.killTimer = undefined;
+        // Invert the reveal's smoothstep so it picks up at the current opacity.
+        this.revealAt = this.t - REVEAL * (0.5 - Math.sin(Math.asin(1 - 2 * clamp(left, 0, 1)) / 3));
+        this.wake();
+      }
+      return;
+    }
     this.phase = 'waiting';
     this.reduced = ctx.reduced;
     this.rand = seeded((ctx.seed ^ 0x5badc0de) >>> 0);
@@ -370,7 +393,8 @@ export class Shadow implements Effect {
   };
 
   private onResize = (): void => {
-    if (this.phase !== 'walking') return;
+    // The path is planned when the probe begins, so a resize then counts too.
+    if (this.phase !== 'walking' && this.phase !== 'probing') return;
     const r = innerWidth / (this.vw || innerWidth);
     const phi = this.phase0 + (TAU * this.dist) / this.stride;
     this.layout();
