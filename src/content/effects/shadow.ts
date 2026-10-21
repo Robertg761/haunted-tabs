@@ -24,6 +24,8 @@ type Phase = 'idle' | 'waiting' | 'probing' | 'walking';
 
 /** Longest wait for the user to scroll or move before it walks anyway (ms). */
 const MAX_WAIT = 700;
+/** Sent to a tab that stays hidden longer than this (ms), it never walks: the moment has passed. */
+const STALE_HIDDEN = 60_000;
 /** How long the blend cost is measured before the walk (s). */
 const PROBE = 0.4;
 /** Seconds spent slowing to a stop, and getting going again. */
@@ -264,6 +266,7 @@ export class Shadow implements Effect {
     this.rand = seeded((ctx.seed ^ 0x5badc0de) >>> 0);
     this.intensity = clamp(0.85 + 0.05 * ctx.stage, 0.85, 1.05);
     this.startedAt = performance.now();
+    if (document.hidden) this.hiddenAt = this.startedAt;
     this.baseN = 0;
     this.listen(true);
     this.armWait();
@@ -352,6 +355,10 @@ export class Shadow implements Effect {
       return;
     }
     if (this.phase === 'waiting') {
+      if (performance.now() - this.hiddenAt > STALE_HIDDEN) {
+        this.destroy();
+        return;
+      }
       this.armWait();
     } else if (this.phase === 'probing') {
       this.startProbe();

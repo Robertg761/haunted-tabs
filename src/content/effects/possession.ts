@@ -17,7 +17,7 @@
 // darken and lift, the apparition surfacing once. Nothing strobes. With reduced
 // motion it is only a slow darkening with the message fading in and out.
 
-import { OUR_ATTR, Z, seeded } from './overlay';
+import { HOST_CSS, Z, createHost, seeded } from './overlay';
 import { APPARITION_CHIN, channelMatrix, drawApparition, drawGrain, drawSnow, moshFilter, shearFilter, splitFilter, svgEl } from './possession-art';
 
 const BANDS = 6;
@@ -26,8 +26,11 @@ const TRACK_SLICES = 3;
 /** Moments the page is struck. Only TEAR_HIT may reach through the words. */
 const HITS = [0.02, 0.12, 0.22, 0.37, 0.5, 0.63, 0.74];
 const TEAR_HIT = 0.5;
-/** Colour shocks for the CSS version, on these hits. */
-const SHOCKS = [0.12, 0.37, 0.63];
+/**
+ * Colour shock for the CSS version. Only one, well clear of the flash, and only a
+ * mild hue swap, so flash and shock together stay under three changes a second.
+ */
+const SHOCKS = [0.37];
 const MOSH_BURSTS: [number, number][] = [
   [0.16, 0.24],
   [0.52, 0.58],
@@ -50,8 +53,7 @@ const NEAR_GLYPHS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
 const SHAPED = /[֐-ࣿऀ-෿฀-࿿က-႟ក-᢯ᨀ-᪯ꠀ-꯿יִ-﷿ﹰ-﻿]|[\u{10800}-\u{10FFF}\u{1E900}-\u{1E95F}]/u;
 
 const BASE_CSS = `
-:host { all: initial; }
-@media print { :host { display: none !important; } }
+${HOST_CSS}
 .wrap { position: fixed; inset: 0; pointer-events: none; overflow: hidden; z-index: ${Z.possession}; }
 .fill { position: absolute; inset: 0; }
 .dim { opacity: 0; backdrop-filter: contrast(.72) brightness(.36) saturate(.4); -webkit-backdrop-filter: contrast(.72) brightness(.36) saturate(.4); }
@@ -85,7 +87,7 @@ const GLITCH_CSS = `
 .track::after { content: ""; position: absolute; inset: 0;
   background: linear-gradient(to bottom, rgba(255,255,255,.16) 0, rgba(255,255,255,.04) 6%, rgba(255,255,255,.04) 90%, rgba(0,0,0,.25) 100%); }
 .flash { visibility: hidden; backdrop-filter: invert(.9) contrast(1.1) saturate(.5) brightness(.9); -webkit-backdrop-filter: invert(.9) contrast(1.1) saturate(.5) brightness(.9); }
-.shock { visibility: hidden; backdrop-filter: hue-rotate(150deg) saturate(2.4); -webkit-backdrop-filter: hue-rotate(150deg) saturate(2.4); }
+.shock { visibility: hidden; backdrop-filter: hue-rotate(150deg) saturate(1.4); -webkit-backdrop-filter: hue-rotate(150deg) saturate(1.4); }
 .vignette.scan { background: repeating-linear-gradient(to bottom, rgba(0,0,0,.2) 0 1px, transparent 1px 3px), radial-gradient(ellipse 80% 75% at 50% 48%, transparent 36%, rgba(10,0,6,.5) 68%, rgba(3,0,2,.94) 100%); }
 .grain { position: absolute; left: -3%; top: -3%; width: 106%; height: 106%; opacity: 0; image-rendering: pixelated; }
 /* The CSS version: shards of the page shifted in colour and contrast instead of displaced. */
@@ -166,8 +168,7 @@ function div(className: string, parent: Element): HTMLDivElement {
 }
 
 function mountHost(css: string): { host: HTMLElement; wrap: HTMLDivElement; root: ShadowRoot } {
-  const host = document.createElement('div');
-  host.setAttribute(OUR_ATTR, 'glitch');
+  const host = createHost('glitch');
   const root = host.attachShadow({ mode: 'closed' });
   const style = document.createElement('style');
   style.textContent = css;

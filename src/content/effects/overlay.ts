@@ -29,15 +29,31 @@ export interface Overlay {
   remove(): void;
 }
 
+/**
+ * Reset for a host element. Important rules inside the shadow root beat the page's,
+ * so a page rule like `div { transform: ... }` cannot collapse an overlay.
+ */
+export const HOST_CSS = `
+  :host { all: initial !important; }
+  @media print { :host { display: none !important; } }
+`;
+
+/** An empty host element for one of our overlays, hidden from assistive tech and focus. */
+export function createHost(tag: string): HTMLDivElement {
+  const host = document.createElement('div');
+  host.setAttribute(OUR_ATTR, tag);
+  host.setAttribute('aria-hidden', 'true');
+  host.inert = true;
+  return host;
+}
+
 /** A click-through, full-viewport overlay for one effect. */
 export function createOverlay(name: EffectName, css = ''): Overlay {
-  const host = document.createElement('div');
-  host.setAttribute(OUR_ATTR, `effect-${name}`);
+  const host = createHost(`effect-${name}`);
   const root = host.attachShadow({ mode: 'closed' });
   const style = document.createElement('style');
   style.textContent = `
-    :host { all: initial; }
-    @media print { :host { display: none !important; } }
+    ${HOST_CSS}
     .layer { position: fixed; inset: 0; pointer-events: none; overflow: hidden; z-index: ${Z[name]}; contain: strict; }
     ${css}
   `;

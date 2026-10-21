@@ -81,6 +81,17 @@ const GHOST_HTML =
   );
 const TRAIL_HTML = svg('arrow', body(ARROW, 0.32));
 
+/** Constant markup, parsed once, cloned per use: no innerHTML in the page. */
+const parsed = new Map<string, Node[]>();
+function nodes(html: string): Node[] {
+  let list = parsed.get(html);
+  if (!list) {
+    list = [...new DOMParser().parseFromString(`<body>${html}</body>`, 'text/html').body.childNodes];
+    parsed.set(html, list);
+  }
+  return list.map((n) => document.importNode(n, true));
+}
+
 const CSS = `
   .g, .t, .r { position: absolute; left: 0; top: 0; opacity: 0; will-change: transform, opacity; }
   .g, .t { width: ${BOX_W}px; height: ${BOX_H}px; transform-origin: ${PAD}px ${PAD}px; }
@@ -314,7 +325,7 @@ export class GhostCursor implements Effect {
       for (let i = 0; i < TRAILS; i++) {
         const t = document.createElement('div');
         t.className = 't';
-        t.innerHTML = TRAIL_HTML;
+        t.append(...nodes(TRAIL_HTML));
         layer.appendChild(t);
         this.trails.push(t);
       }
@@ -327,7 +338,7 @@ export class GhostCursor implements Effect {
     }
     this.ghost = document.createElement('div');
     this.ghost.className = 'g';
-    this.ghost.innerHTML = GHOST_HTML;
+    this.ghost.append(...nodes(GHOST_HTML));
     this.aura = this.ghost.querySelector('.aura');
     layer.appendChild(this.ghost);
 

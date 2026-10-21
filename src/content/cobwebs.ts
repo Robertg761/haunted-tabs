@@ -43,7 +43,7 @@ import {
   strokeStyles,
 } from './cobwebs-art';
 import { Spider, dropSpiderSprites, type SpiderWorld } from './cobwebs-spider';
-import { Z } from './effects/overlay';
+import { HOST_CSS, Z, createHost } from './effects/overlay';
 
 interface Dew {
   s: Strand;
@@ -81,7 +81,6 @@ interface Break {
   vy: number;
 }
 
-const OUR_ATTR = 'data-haunted-tabs';
 const MAX_WEBS = 8;
 const STEP_MS = 1000 / 60;
 const GRAVITY = 0.05;
@@ -933,13 +932,13 @@ export class Cobwebs {
 
   private ensureCanvas(): void {
     if (this.host?.isConnected) return;
-    const host = document.createElement('div');
-    host.setAttribute(OUR_ATTR, 'cobwebs');
+    const host = createHost('cobwebs');
     const root = host.attachShadow({ mode: 'closed' });
     const style = document.createElement('style');
     style.textContent = `
+      ${HOST_CSS}
       canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; pointer-events: none; z-index: ${Z.cobwebs}; }
-      @media print { :host, canvas { display: none !important; } }
+      @media print { canvas { display: none !important; } }
     `;
     // Calm webs are drawn once into the base layer; only what moves is redrawn on top.
     const base = document.createElement('canvas');
