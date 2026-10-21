@@ -12,12 +12,19 @@ const MARGIN = 40; // extra width on each side for the pointer parallax
 interface Layer {
   el: HTMLElement;
   depth: number;
+  /** The most a layer may rise as the page scrolls, as a share of the window height. */
+  lift: number;
 }
+
+let nearRidge = 0;
+/** Where the near ridge (with the fence) meets the sky, in page pixels when scrolled to the top. */
+export const nearRidgeY = (): number => nearRidge;
 
 export function startScene(reducedMotion: () => boolean): void {
   const layers: Layer[] = [...document.querySelectorAll<HTMLElement>('.scene [data-depth]')].map((el) => ({
     el,
     depth: Number(el.dataset.depth),
+    lift: Number(el.dataset.lift ?? 1),
   }));
 
   const draw = (): void => {
@@ -42,25 +49,32 @@ export function startScene(reducedMotion: () => boolean): void {
     }, 150);
   });
 
-  // Parallax: scroll lifts nearer layers faster; the pointer sways them a little.
+  // Parallax: scroll lifts nearer layers faster, but only so far: however deep the yard,
+  // the ridges stay in order and the sky and moon stay in view. The pointer sways them a little.
   let target = 0;
   let sway = 0;
   let ticking = false;
-  const update = (): void => {
+  let last = 0;
+  const update = (now = performance.now()): void => {
     ticking = false;
     const reduced = reducedMotion();
-    if (!reduced) sway += (target - sway) * 0.08;
-    const scroll = reduced ? 0 : Math.min(scrollY, innerHeight * 2);
-    for (const { el, depth } of layers) {
+    // Eased by time, not by frame, so it settles in the same ~half second at any frame rate.
+    const dt = Math.min(100, now - (last || now));
+    last = now;
+    if (!reduced) sway += (target - sway) * (1 - Math.exp(-dt / 150));
+    const scroll = reduced ? 0 : scrollY;
+    for (const { el, depth, lift } of layers) {
       const x = reduced ? 0 : sway * depth * 70;
-      el.style.translate = `${x.toFixed(2)}px ${(-scroll * depth).toFixed(1)}px`;
+      const y = Math.min(scroll * depth, innerHeight * lift);
+      el.style.translate = `${x.toFixed(1)}px ${(-y).toFixed(1)}px`;
     }
-    if (!reduced && Math.abs(target - sway) > 0.002) request();
+    if (!reduced && Math.abs(target - sway) > 0.004) request();
+    else last = 0;
   };
   const request = (): void => {
     if (ticking) return;
     ticking = true;
-    requestAnimationFrame(update);
+    requestAnimationFrame((t) => update(t));
   };
   addEventListener('scroll', request, { passive: true });
   addEventListener(
@@ -322,7 +336,17 @@ function drawLandscape(): void {
 
   // Near crest: the iron fence, a great dead tree at the edge, long grass.
   const nearY = ridge(r, vh * (narrow ? 0.82 : 0.8), vh * 0.018, [1500, 640, 260]);
+  nearRidge = nearY(W / 2);
   const near = ridgePaths(nearY, W, H);
+  // Below the crest the yard rolls on in low swells, each catching a little moonlight, so a
+  // long scroll still reads as ground receding rather than a black wall.
+  let swells = '';
+  for (let i = 1; i <= 5; i++) {
+    const swell = ridge(r, vh * (narrow ? 0.84 : 0.82) + vh * 0.09 * i, vh * 0.012, [900, 380]);
+    const p = ridgePaths(swell, W, H);
+    swells += `<path d="${p.fill}" fill="#0c0a15" fill-opacity="${(0.5 + i * 0.08).toFixed(2)}"/><path d="${p.rim}" fill="none" stroke="#6f69a0" stroke-opacity="${(0.09 - i * 0.008).toFixed(3)}" stroke-width="1"/>`;
+    swells += `<path d="${grass(r, swell, W, 4 * s)}" fill="#0c0a15"/>`;
+  }
   const bigX = MARGIN + (narrow ? 4 : vw * 0.035);
   const big = deadTree(r, bigX, nearY(bigX), vh * (narrow ? 0.4 : 0.56), 0.1, 7);
   const smallX = W * 0.965;
@@ -331,7 +355,8 @@ function drawLandscape(): void {
     'hills-near',
     grad('g-near', '#0b0914', '#05040a', vh * 0.75, vh * 1.2) +
       `<path d="${near.fill}${fence(r, nearY, W, vh)}${grass(r, nearY, W, 7 * s)}" fill="url(#g-near)"/><path d="${big}${small}" fill="url(#g-near)"/>` +
-      `<path d="${near.rim}" fill="none" stroke="#8d88c0" stroke-opacity=".1" stroke-width="1"/>`,
+      `<path d="${near.rim}" fill="none" stroke="#8d88c0" stroke-opacity=".1" stroke-width="1"/>` +
+      swells,
   );
 }
 
@@ -393,7 +418,7 @@ function scheduleBats(reducedMotion: () => boolean): void {
   const flight = (): void => {
     const next = 16_000 + Math.random() * 22_000;
     setTimeout(flight, next);
-    if (reducedMotion() || document.visibilityState !== 'visible') return;
+    if (reducedMotion() || document.visibilityState !== 'visible' || document.documentElement.classList.contains('still')) return;
     const flock = Math.random() < 0.3 ? 2 + Math.floor(Math.random() * 2) : 1;
     const rtl = Math.random() < 0.5;
     const y = 6 + Math.random() * 24;

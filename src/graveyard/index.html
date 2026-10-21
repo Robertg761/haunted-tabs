@@ -11,17 +11,17 @@
   <body>
     <div class="scene" aria-hidden="true">
       <div class="sky"></div>
-      <div class="layer starfield" data-depth="0.03"><canvas class="stars"></canvas><div class="twinkles"></div></div>
-      <div class="layer moon-layer" data-depth="0.06">
+      <div class="layer starfield" data-depth="0.03" data-lift="0.05"><canvas class="stars"></canvas><div class="twinkles"></div></div>
+      <div class="layer moon-layer" data-depth="0.06" data-lift="0.1">
         <div class="moon"><div class="halo"></div><div class="disc"></div></div>
         <div class="cloud one"></div>
         <div class="cloud two"></div>
       </div>
       <div class="bats"></div>
-      <div class="layer hills" data-depth="0.12"><svg id="hills-far"></svg></div>
-      <div class="layer hills" data-depth="0.2"><svg id="hills-mid"></svg></div>
-      <div class="layer fog-layer back" data-depth="0.26"><canvas class="fog" data-height="260"></canvas></div>
-      <div class="layer hills" data-depth="0.34"><svg id="hills-near"></svg></div>
+      <div class="layer hills" data-depth="0.12" data-lift="0.22"><svg id="hills-far"></svg></div>
+      <div class="layer hills" data-depth="0.2" data-lift="0.26"><svg id="hills-mid"></svg></div>
+      <div class="layer fog-layer back" data-depth="0.26" data-lift="0.14"><canvas class="fog" data-height="260"></canvas></div>
+      <div class="layer hills" data-depth="0.34" data-lift="0.3"><svg id="hills-near"></svg></div>
       <div class="wisps"><i></i><i></i><i></i><i></i></div>
     </div>
 
@@ -68,45 +68,37 @@
     <footer class="foot">Nothing buried here is ever truly lost.</footer>
 
     <div class="fog-front" aria-hidden="true"><canvas class="fog" data-height="220"></canvas></div>
-    <div class="vignette" aria-hidden="true"></div>
     <canvas class="spirits" aria-hidden="true"></canvas>
 
     <svg class="defs" width="0" height="0" aria-hidden="true" focusable="false">
       <defs>
         <linearGradient id="mat-granite" x1="1" y1="0" x2=".2" y2="1">
-          <stop offset="0" stop-color="#9da3af" /><stop offset=".55" stop-color="#868c97" /><stop offset="1" stop-color="#7c828e" />
+          <stop offset="0" stop-color="#8f96a1" /><stop offset=".55" stop-color="#7f8591" /><stop offset="1" stop-color="#787e8a" />
         </linearGradient>
         <linearGradient id="mat-limestone" x1="1" y1="0" x2=".2" y2="1">
-          <stop offset="0" stop-color="#b0a48c" /><stop offset=".55" stop-color="#968b76" /><stop offset="1" stop-color="#8a806c" />
+          <stop offset="0" stop-color="#a39476" /><stop offset=".55" stop-color="#928365" /><stop offset="1" stop-color="#8b7c5d" />
         </linearGradient>
         <linearGradient id="mat-slate" x1="1" y1="0" x2=".2" y2="1">
-          <stop offset="0" stop-color="#93a0b6" /><stop offset=".55" stop-color="#7f8a9d" /><stop offset="1" stop-color="#788395" />
+          <stop offset="0" stop-color="#525d73" /><stop offset=".55" stop-color="#434d63" /><stop offset="1" stop-color="#3b4458" />
         </linearGradient>
         <linearGradient id="mat-marble" x1="1" y1="0" x2=".2" y2="1">
-          <stop offset="0" stop-color="#bcbbc1" /><stop offset=".55" stop-color="#a09fa7" /><stop offset="1" stop-color="#93929a" />
+          <stop offset="0" stop-color="#a9adb6" /><stop offset=".55" stop-color="#999da7" /><stop offset="1" stop-color="#9195a0" />
         </linearGradient>
         <radialGradient id="moonlit" cx=".88" cy="-.05" r="1.05">
-          <stop offset="0" stop-color="#eef2ff" stop-opacity=".26" /><stop offset=".5" stop-color="#e6ebff" stop-opacity=".08" /><stop offset="1" stop-color="#e6ebff" stop-opacity="0" />
+          <stop offset="0" stop-color="#eef2ff" stop-opacity=".14" /><stop offset=".5" stop-color="#e6ebff" stop-opacity=".08" /><stop offset="1" stop-color="#e6ebff" stop-opacity="0" />
         </radialGradient>
         <linearGradient id="damp" x1="0" y1="0" x2="0" y2="1">
           <stop offset="0" stop-color="#1c2418" stop-opacity="0" /><stop offset=".6" stop-color="#1c2418" stop-opacity=".06" /><stop offset="1" stop-color="#1c2418" stop-opacity=".3" />
         </linearGradient>
         <radialGradient id="moss" cx=".45" cy=".35" r=".7">
-          <stop offset="0" stop-color="#5d7a3c" /><stop offset=".55" stop-color="#455d2d" /><stop offset="1" stop-color="#34492a" stop-opacity=".85" />
+          <stop offset="0" stop-color="#55663f" /><stop offset=".55" stop-color="#435234" /><stop offset="1" stop-color="#36432c" stop-opacity=".9" />
         </radialGradient>
-        <radialGradient id="candlelight-r" cx="1.02" cy=".97" r=".9">
-          <stop offset="0" stop-color="#ffb862" stop-opacity=".62" /><stop offset=".4" stop-color="#ff9c4c" stop-opacity=".24" /><stop offset="1" stop-color="#ff9a4a" stop-opacity="0" />
-        </radialGradient>
-        <radialGradient id="candlelight-l" href="#candlelight-r" cx="-.02" />
         <radialGradient id="edge-shade" cx=".56" cy=".42" r=".72">
           <stop offset=".55" stop-color="#000" stop-opacity="0" /><stop offset="1" stop-color="#05060a" stop-opacity=".26" />
         </radialGradient>
         <linearGradient id="streak" x1="0" y1="0" x2="0" y2="1">
           <stop offset="0" stop-color="#20242c" stop-opacity=".34" /><stop offset="1" stop-color="#20242c" stop-opacity="0" />
         </linearGradient>
-        <radialGradient id="spirit" cx=".5" cy=".45" r=".75">
-          <stop offset="0" stop-color="#e6fff3" stop-opacity=".7" /><stop offset=".6" stop-color="#b8ffe0" stop-opacity=".3" /><stop offset="1" stop-color="#9ff5d4" stop-opacity=".1" />
-        </radialGradient>
         <radialGradient id="candleground" cx=".5" cy=".5" r=".5">
           <stop offset="0" stop-color="#ffaa55" stop-opacity=".45" /><stop offset="1" stop-color="#ffaa55" stop-opacity="0" />
         </radialGradient>
@@ -114,7 +106,7 @@
           <stop offset="0" stop-color="#4a3a2c" /><stop offset=".35" stop-color="#2c2219" /><stop offset=".8" stop-color="#16110d" stop-opacity=".9" /><stop offset="1" stop-color="#0d0a08" stop-opacity="0" />
         </linearGradient>
         <radialGradient id="turf" cx=".5" cy=".5" r=".5">
-          <stop offset="0" stop-color="#1b1712" stop-opacity=".95" /><stop offset=".6" stop-color="#14110d" stop-opacity=".6" /><stop offset="1" stop-color="#0e0c0a" stop-opacity="0" />
+          <stop offset="0" stop-color="#2a241b" stop-opacity=".95" /><stop offset=".55" stop-color="#1c1813" stop-opacity=".7" /><stop offset="1" stop-color="#0e0c0a" stop-opacity="0" />
         </radialGradient>
         <pattern id="grain" patternUnits="userSpaceOnUse" width="180" height="180"><image width="180" height="180" /></pattern>
         <pattern id="mottle" patternUnits="userSpaceOnUse" width="420" height="420"><image width="420" height="420" /></pattern>

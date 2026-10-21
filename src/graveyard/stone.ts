@@ -62,6 +62,8 @@ export function buildGrave(g: Grave, t: Traits): HTMLElement {
       class: `grave stone shape-${t.shape} mat-${t.material}`,
       'data-id': g.id,
       'aria-label': g.title,
+      // Focus lands on the stone itself (not a button) when its neighbour leaves the yard.
+      tabindex: '-1',
       style: `--tilt:${t.tilt.toFixed(2)}deg;--sink:${t.sink}px;--w:${t.width.toFixed(3)}`,
     },
     el(
@@ -74,13 +76,15 @@ export function buildGrave(g: Grave, t: Traits): HTMLElement {
           'div',
           { class: 'carving' },
           svgEl('slab'),
+          lights(t.candleLeft),
           el(
             'div',
             { class: 'inscription' },
             el('p', { class: 'rip', text: g.cause === 'haunting' ? 'Here lies' : 'At rest' }),
             el('span', { class: 'inlay' }, fav),
-            el('h2', { class: 'name', title: g.title, text: g.title }),
-            el('a', { class: 'site', href: g.url, title: g.url, target: '_blank', rel: 'noreferrer', text: siteName(g.url) }),
+            el('h2', { class: 'name', title: g.title, dir: 'auto', text: g.title }),
+            // Not a tab stop: opening the page from here would leave its grave behind (Resurrect does both).
+            el('a', { class: 'site', href: g.url, title: g.url, target: '_blank', rel: 'noreferrer', dir: 'auto', tabindex: '-1', text: siteName(g.url) }),
             el('span', { class: 'rule', 'aria-hidden': 'true' }),
             el(
               'p',
@@ -115,10 +119,15 @@ export function buildBlankStone(): HTMLElement {
   return el(
     'div',
     { class: 'grave blank shape-round mat-granite', style: '--tilt:-1.6deg;--sink:4px;--w:1', 'aria-hidden': 'true' },
-    el('div', { class: 'plot' }, el('div', { class: 'body' }, el('div', { class: 'carving' }, svgEl('slab'), el('div', { class: 'inscription' })))),
+    el('div', { class: 'plot' }, el('div', { class: 'body' }, el('div', { class: 'carving' }, svgEl('slab'), lights(false), el('div', { class: 'inscription' })))),
     svgEl('mound'),
     el('span', { class: 'candle lit' }, el('i', { class: 'flame' })),
   );
+}
+
+/** Candle and spirit light, as plain layers over the stone (clipped to its outline once drawn). */
+function lights(candleLeft: boolean): HTMLElement {
+  return el('div', { class: 'lights', 'aria-hidden': 'true' }, el('i', { class: `candlelight${candleLeft ? ' left' : ''}` }), el('i', { class: 'spiritlight' }));
 }
 
 function svgEl(cls: string): SVGSVGElement {
@@ -272,13 +281,17 @@ function cracks(r: Rand, w: number, h: number, count: number, capY: number): str
   return d;
 }
 
-/** A soft irregular blob (for moss), smoothed through Catmull-Rom points. */
+/** A lumpy, ragged blob (for moss), smoothed through Catmull-Rom points. */
 function blob(r: Rand, cx: number, cy: number, rad: number): string {
-  const n = 12;
+  const n = 26;
   const pts: [number, number][] = [];
+  let k = 1;
   for (let i = 0; i < n; i++) {
     const a = (i / n) * Math.PI * 2;
-    const k = between(r, 0.6, 1.15);
+    // A random walk around the rim for broad lumps, plus a little jitter for a ragged edge.
+    k = Math.min(1.25, Math.max(0.55, k + between(r, -0.22, 0.22)));
+    k = i === n - 1 ? (k + 1) / 2 : k;
+    k *= between(r, 0.86, 1.08);
     pts.push([cx + Math.cos(a) * rad * k, cy + Math.sin(a) * rad * k * 0.7]);
   }
   let d = `M${n1(pts[0][0])},${n1(pts[0][1])}`;
@@ -323,12 +336,15 @@ export function drawStone(grave: HTMLElement, t: Traits): void {
     const left = i % 2 === 0 ? firstLeft : !firstLeft;
     const cx = left ? between(r, 0, w * 0.18) : between(r, w * 0.82, w);
     const cy = h - GROUND - t.sink - between(r, 0, 14);
-    const rad = w * between(r, 0.08, 0.16) * mossy;
+    const rad = w * between(r, 0.06, 0.17) * mossy;
     moss += blob(r, cx, cy, rad);
-    for (let k = 0; k < 10; k++) {
+    // A few satellite clumps and a halo of spores, so the edge never reads as a cut-out.
+    for (let c = 0; c < 2; c++) moss += blob(r, cx + between(r, -1.3, 1.3) * rad, cy + between(r, -0.9, 0.3) * rad, rad * between(r, 0.18, 0.4));
+    for (let k = 0; k < 28; k++) {
       const a = r() * Math.PI * 2;
-      const dist = rad * between(r, 0.9, 1.9);
-      speck += `M${n1(cx + Math.cos(a) * dist)},${n1(cy + Math.sin(a) * dist * 0.8)}h1.4v1.4h-1.4Z`;
+      const dist = rad * between(r, 0.7, 1.7);
+      const s = between(r, 0.6, 1.6);
+      speck += `M${n1(cx + Math.cos(a) * dist)},${n1(cy + Math.sin(a) * dist * 0.75)}h${n1(s)}v${n1(s)}h${n1(-s)}Z`;
     }
   }
   if (t.age > 0.35 && r() < 0.4 + t.age * 0.5) {
@@ -384,13 +400,13 @@ export function drawStone(grave: HTMLElement, t: Traits): void {
     `<rect width="${w}" height="${h}" fill="url(#mottle)" class="mottle"/>` +
     `<rect width="${w}" height="${h}" fill="url(#moonlit)"/>` +
     facets +
-    (veins ? `<path d="${veins}" fill="none" stroke="#6f6e78" stroke-opacity=".22" stroke-width="1.2"/>` : '') +
+    (veins ? `<path d="${veins}" fill="none" stroke="#5d6270" stroke-opacity=".3" stroke-width="1.3" stroke-linejoin="round"/><path d="${veins}" fill="none" stroke="#5d6270" stroke-opacity=".12" stroke-width="4"/>` : '') +
     `<rect y="${n1(h * 0.55)}" width="${w}" height="${n1(h * 0.45)}" fill="url(#damp)"/>` +
     streaks +
     `<rect width="${w}" height="${h}" fill="url(#edge-shade)"/>` +
     `<path d="${lichen}" fill="#c9c79a" fill-opacity=".28"/>` +
     `<path d="${moss}" fill="url(#moss)"/>` +
-    `<path d="${speck}" fill="#56703a" fill-opacity=".75"/>` +
+    `<path d="${speck}" fill="#4d5c38" fill-opacity=".8"/>` +
     `<rect width="${w}" height="${h}" fill="url(#grain)" class="grain"/>` +
     `<path d="${pnl.d}" transform="translate(${n1(pnl.shift + 0.6)} ${n1(pnl.shift + 1.2)})" fill="none" stroke="#fff" stroke-opacity=".22" stroke-width="1"/>` +
     `<path d="${pnl.d}" transform="translate(${n1(pnl.shift)} ${n1(pnl.shift)})" fill="none" stroke="#000" stroke-opacity=".32" stroke-width="1.2"/>` +
@@ -400,9 +416,9 @@ export function drawStone(grave: HTMLElement, t: Traits): void {
     `<path d="${d}" fill="none" stroke="#000" stroke-opacity=".16" stroke-width="12"/>` +
     `<path d="${d}" fill="none" stroke="#000" stroke-opacity=".3" stroke-width="4"/>` +
     `<path d="${d}" fill="none" stroke="#eef2ff" stroke-opacity=".45" stroke-width="2.2" transform="translate(-1.2 1.4)"/>` +
-    `<rect width="${w}" height="${h}" fill="url(#candlelight-${t.candleLeft ? 'l' : 'r'})" class="candlelight"/>` +
-    `<rect width="${w}" height="${h}" fill="url(#spirit)" class="spiritlight"/>` +
     `</g>`;
+  const glow = grave.querySelector<HTMLElement>('.lights');
+  if (glow) glow.style.clipPath = `path('${d}')`;
 
   drawMound(mound, t, w);
   grave.style.setProperty('--rise', `${h + 12}px`);

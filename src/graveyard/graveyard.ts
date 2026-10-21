@@ -2,7 +2,7 @@ import { loadGraves, onGravesChanged, saveGraves } from '../shared/storage';
 import type { Grave } from '../shared/types';
 import { ext } from '../shared/ext';
 import { Particles } from './particles';
-import { startScene } from './scene';
+import { nearRidgeY, startScene } from './scene';
 import { buildBlankStone, buildGrave, drawStone, traitsFor, type Traits } from './stone';
 
 const gravesEl = document.getElementById('graves')!;
@@ -21,6 +21,9 @@ const counts = {
 
 const motion = matchMedia('(prefers-reduced-motion: reduce)');
 const reduced = (): boolean => motion.matches;
+const narrow = matchMedia('(max-width: 640px)');
+/** Above this many graves the yard switches to smaller stones. */
+const COMPACT_OVER = 12;
 
 const particles = new Particles(document.querySelector<HTMLCanvasElement>('canvas.spirits')!, () => !reduced());
 startScene(reduced);
@@ -42,6 +45,10 @@ let loaded = false;
 let firstRender = true;
 let departing = 0;
 let lastQuery = '';
+/** When focus was last moved by the page itself (not the user), to ignore a key still held down. */
+let focusMovedAt = 0;
+let ascended: string[] = [];
+let announceTimer = 0;
 const nodes = new Map<string, GraveNode>();
 const traitsOf = new WeakMap<Element, Traits>();
 const removals: HTMLElement[] = [];
@@ -158,6 +165,7 @@ function resetLeaving(el: HTMLElement): void {
 }
 
 function render(): void {
+  gravesEl.classList.toggle('compact', graves.length > COMPACT_OVER || narrow.matches);
   const shown = visible();
   const shownIds = new Set(shown.map((g) => g.id));
   const live = new Set(graves.map((g) => g.id));
@@ -205,9 +213,30 @@ function render(): void {
   }
 
   if (!firstRender) glide(first, appeared);
+  else requestAnimationFrame(() => requestAnimationFrame(anchorYard));
   firstRender = false;
   updateHeader(shown);
 }
+
+/**
+ * Stand the first row of graves on the near ridge, in front of the fence, rather than
+ * floating above it on tall windows. Only ever adds space, and only on load and resize.
+ */
+function anchorYard(): void {
+  const wrap = gravesEl.parentElement!;
+  const firstStone = gravesEl.querySelector<HTMLElement>('.grave:not([hidden])');
+  if (!firstStone || !nearRidgeY()) return;
+  const current = parseFloat(wrap.style.getPropertyValue('--anchor')) || 0;
+  const ground = firstStone.getBoundingClientRect().bottom + scrollY - 40;
+  const next = Math.max(0, Math.min(220, current + nearRidgeY() + 12 - ground));
+  if (Math.abs(next - current) > 2) wrap.style.setProperty('--anchor', `${Math.round(next)}px`);
+}
+let anchorTimer = 0;
+addEventListener('resize', () => {
+  clearTimeout(anchorTimer);
+  anchorTimer = window.setTimeout(anchorYard, 300);
+});
+narrow.addEventListener('change', render);
 
 function updateHeader(shown: Grave[]): void {
   const n = graves.length;
@@ -219,7 +248,14 @@ function updateHeader(shown: Grave[]): void {
     ? 'Every tab the haunting takes will lie here. Nothing is ever lost.'
     : q
       ? `${shown.length} of ${n} grave${n === 1 ? '' : 's'} answer to “${q}”.`
-      : `${n} forgotten tab${n === 1 ? ' rests' : 's rest'} here. Resurrect any of them to open it again.`;
+      : n === 1
+        ? '1 forgotten tab rests here. Resurrect it to open it again.'
+        : `${n} forgotten tabs rest here. Resurrect any of them to open it again.`;
+  if (shown.length === 0 && document.activeElement === resurrectAll) {
+    // Disabling the focused button would drop focus on the floor; hand it to the search instead.
+    focusMovedAt = performance.now();
+    searchInput.focus({ preventScroll: true });
+  }
   resurrectAll.disabled = shown.length === 0;
   resurrectAllLabel.textContent = shown.length && shown.length !== n ? `Resurrect ${shown.length}` : 'Resurrect all';
   if (q !== lastQuery) {
@@ -270,7 +306,7 @@ function depart(node: GraveNode): void {
     return;
   }
   const fate = el.dataset.fate === 'resurrect' ? 'ascend' : el.dataset.fate === 'rest' ? 'sink' : 'fade';
-  if (fate === 'ascend') status.textContent = `${node.grave.title} has risen and is open again.`;
+  if (fate === 'ascend') announceRisen(node.grave.title);
   if (fate === 'sink') status.textContent = `${node.grave.title} was laid to rest.`;
   departing++;
   const wait = fate === 'ascend' && node.summonedAt !== undefined ? Math.max(0, node.summonedAt + (node.wave ?? 0) + 520 - performance.now()) : 0;
@@ -293,14 +329,26 @@ function depart(node: GraveNode): void {
   }, wait);
 }
 
+/** One message for a whole wave of resurrections, not one per stone. */
+function announceRisen(title: string): void {
+  ascended.push(title);
+  clearTimeout(announceTimer);
+  announceTimer = window.setTimeout(() => {
+    status.textContent = ascended.length === 1 ? `${ascended[0]} has risen and is open again.` : `${ascended.length} graves have risen and their tabs are open again.`;
+    ascended = [];
+  }, 400);
+}
+
 function effects(el: HTMLElement, fate: 'ascend' | 'sink' | 'fade'): void {
   const carving = el.querySelector('.carving')!;
   const mound = el.querySelector('.mound')!;
   if (fate === 'ascend') {
+    // Share a fixed budget of motes across however many stones are rising together.
+    const share = 1 / Math.max(1, Math.sqrt(gravesEl.querySelectorAll('.ascend').length));
     [0, 180, 420, 700, 950].forEach((t, i) =>
       setTimeout(() => {
         const r = carving.getBoundingClientRect();
-        particles.motes(new DOMRect(r.left, r.top + r.height * (0.15 * i), r.width, r.height * 0.7), i === 0 ? 34 : 18);
+        particles.motes(new DOMRect(r.left, r.top + r.height * (0.15 * i), r.width, r.height * 0.7), Math.round((i === 0 ? 30 : 16) * share));
       }, t),
     );
   } else if (fate === 'sink') {
@@ -321,15 +369,21 @@ function flushRemovals(): void {
   updateEmpty();
 }
 
+/**
+ * Focus moves to the neighbouring stone itself (never one of its buttons, so a key still held
+ * down cannot act on it), skipping stones hidden by the search or on their way out.
+ */
 function moveFocusFrom(el: HTMLElement): void {
+  const usable = (n: Element | null): n is HTMLElement =>
+    !!n && n.classList.contains('stone') && !(n as HTMLElement).hidden && !n.classList.contains('leaving');
   let next: Element | null = el.nextElementSibling;
-  while (next && !(next as HTMLElement).classList.contains('stone')) next = next.nextElementSibling;
+  while (next && !usable(next)) next = next.nextElementSibling;
   if (!next) {
     next = el.previousElementSibling;
-    while (next && !(next as HTMLElement).classList.contains('stone')) next = next.previousElementSibling;
+    while (next && !usable(next)) next = next.previousElementSibling;
   }
-  const target = next?.querySelector<HTMLElement>('[data-action="resurrect"]') ?? searchInput;
-  target.focus({ preventScroll: true });
+  focusMovedAt = performance.now();
+  ((next as HTMLElement | null) ?? searchInput).focus({ preventScroll: true });
 }
 
 // ---------------------------------------------------------------- resurrection
@@ -347,6 +401,7 @@ function summon(node: GraveNode, wave = 0): void {
     el.prepend(beam);
   }
   el.classList.add('summoning');
+  el.querySelectorAll('[data-action]').forEach((b) => b.setAttribute('aria-disabled', 'true'));
   setTimeout(() => {
     if (el.isConnected) particles.motes(el.querySelector('.carving')!.getBoundingClientRect(), 10);
   }, wave + 150);
@@ -357,6 +412,7 @@ function unsummon(node: GraveNode): void {
   delete el.dataset.fate;
   el.classList.remove('summoning');
   el.querySelector('.beam')?.remove();
+  el.querySelectorAll('[data-action]').forEach((b) => b.removeAttribute('aria-disabled'));
 }
 
 /** Reopen tabs first, and only then remove their graves, so a failure loses nothing. */
@@ -404,7 +460,10 @@ gravesEl.addEventListener('click', async (e) => {
   if (!button || !stone) return;
   const id = stone.dataset.id!;
   const node = nodes.get(id);
-  if (!node) return;
+  // Nothing more can be done to a grave already being raised.
+  if (!node || pending.has(id)) return;
+  // A keyboard "click" (detail 0) right after the page moved focus is a key still held down.
+  if (e.detail === 0 && performance.now() - focusMovedAt < 500) return;
   if (button.dataset.action === 'resurrect') {
     await raise([{ node, wave: 0 }]);
   } else if (button.dataset.action === 'forget') {
@@ -437,6 +496,11 @@ resurrectAll.addEventListener('click', async () => {
 
 // ---------------------------------------------------------------- search and keys
 
+// Auto-repeat from a held key never acts on the graves.
+gravesEl.addEventListener('keydown', (e) => {
+  if (e.repeat && (e.key === 'Enter' || e.key === ' ') && (e.target as HTMLElement).closest('[data-action]')) e.preventDefault();
+});
+
 let searchTimer = 0;
 searchInput.addEventListener('input', () => {
   clearTimeout(searchTimer);
@@ -454,6 +518,16 @@ document.getElementById('clear-search')!.addEventListener('click', () => {
   render();
   searchInput.focus();
 });
+// After a while with no input the night holds still (see .still in the CSS); any input wakes it.
+let stillTimer = 0;
+const wake = (): void => {
+  document.documentElement.classList.remove('still');
+  clearTimeout(stillTimer);
+  stillTimer = window.setTimeout(() => document.documentElement.classList.add('still'), 25_000);
+};
+for (const type of ['pointermove', 'pointerdown', 'keydown', 'wheel', 'scroll', 'focusin', 'touchstart']) addEventListener(type, wake, { passive: true });
+wake();
+
 addEventListener('keydown', (e) => {
   const typing = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement;
   if (e.key === '/' && !typing && !e.metaKey && !e.ctrlKey && !e.altKey) {
@@ -464,18 +538,24 @@ addEventListener('keydown', (e) => {
 
 // ---------------------------------------------------------------- stone textures
 
-/** Fine grain and broad mottling for the stones, from SVG noise rendered once as images. */
+/**
+ * Fine grain and broad mottling for the stones: SVG noise rendered once as images, where values
+ * below the middle become dark specks and values above become light ones, both as plain alpha.
+ * Stones then layer them with ordinary blending, which is cheap to draw and to animate over.
+ */
 function setGrainTextures(): void {
-  const noise = (size: number, freq: number, octaves: number, slope: number, intercept: number, alpha: number): string =>
+  const noise = (size: number, freq: number, octaves: number, strength: number): string =>
     'data:image/svg+xml,' +
     encodeURIComponent(
-      `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}"><filter id="n" x="0" y="0" width="100%" height="100%">` +
+      `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}"><filter id="n" x="0" y="0" width="100%" height="100%" color-interpolation-filters="sRGB">` +
         `<feTurbulence type="fractalNoise" baseFrequency="${freq}" numOctaves="${octaves}" stitchTiles="stitch" seed="3"/>` +
-        `<feColorMatrix values="${slope} 0 0 0 ${intercept}  ${slope} 0 0 0 ${intercept}  ${slope} 0 0 0 ${intercept}  0 0 0 0 ${alpha}"/>` +
+        `<feColorMatrix values="1 0 0 0 0  1 0 0 0 0  1 0 0 0 0  1 0 0 0 0"/>` +
+        `<feComponentTransfer><feFuncR type="discrete" tableValues="0 1"/><feFuncG type="discrete" tableValues="0 1"/><feFuncB type="discrete" tableValues="0 1"/>` +
+        `<feFuncA type="table" tableValues="${strength} 0 ${strength}"/></feComponentTransfer>` +
         `</filter><rect width="100%" height="100%" filter="url(#n)"/></svg>`,
     );
-  document.querySelector('#grain image')?.setAttribute('href', noise(180, 0.8, 3, 1.6, -0.3, 1));
-  document.querySelector('#mottle image')?.setAttribute('href', noise(420, 0.013, 4, 1.5, -0.25, 1));
+  document.querySelector('#grain image')?.setAttribute('href', noise(180, 0.8, 3, 0.5));
+  document.querySelector('#mottle image')?.setAttribute('href', noise(420, 0.013, 4, 0.55));
 }
 
 // ---------------------------------------------------------------- go

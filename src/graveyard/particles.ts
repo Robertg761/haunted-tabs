@@ -17,7 +17,7 @@ interface Particle {
   phase: number;
 }
 
-const MAX_PARTICLES = 900;
+const MAX_PARTICLES = 320;
 
 export class Particles {
   private readonly canvas: HTMLCanvasElement;
@@ -35,10 +35,10 @@ export class Particles {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d')!;
     this.glow = makeGlowSprite();
-    this.resize();
-    addEventListener('resize', () => this.resize());
+    addEventListener('resize', () => this.running && this.resize());
   }
 
+  /** The canvas only has a bitmap (and only takes part in compositing) while particles are alive. */
   private resize(): void {
     this.dpr = Math.min(devicePixelRatio || 1, 2);
     this.canvas.width = Math.round(innerWidth * this.dpr);
@@ -89,6 +89,8 @@ export class Particles {
     this.particles.push(p);
     if (!this.running) {
       this.running = true;
+      this.resize();
+      this.canvas.classList.add('running');
       this.last = performance.now();
       requestAnimationFrame((t) => this.frame(t));
     }
@@ -138,8 +140,8 @@ export class Particles {
     if (alive.length) requestAnimationFrame((t) => this.frame(t));
     else {
       this.running = false;
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
-      ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+      this.canvas.classList.remove('running');
+      this.canvas.width = this.canvas.height = 0;
     }
   }
 }

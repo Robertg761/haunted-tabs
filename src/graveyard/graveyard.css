@@ -48,6 +48,7 @@ body {
   position: absolute;
   inset: 0;
   background:
+    radial-gradient(ellipse 125% 95% at 50% 38%, transparent 58%, rgba(0, 0, 0, 0.42) 100%),
     radial-gradient(ellipse 55% 42% at 80% 10%, rgba(126, 134, 210, 0.2), transparent 70%),
     radial-gradient(ellipse 90% 40% at 50% 62%, rgba(90, 80, 150, 0.16), transparent 70%),
     linear-gradient(180deg, #030309 0%, #08071a 28%, #131030 55%, #221c40 72%, #17142c 100%);
@@ -210,10 +211,10 @@ body {
 .bat.rtl { animation-name: bat-rtl; }
 .bat-bob { animation: bat-bob var(--bob) ease-in-out infinite alternate; }
 .bat svg { display: block; width: 100%; overflow: visible; fill: #05040a; filter: drop-shadow(0 0 1px rgba(170, 170, 220, 0.45)); }
-.bat .wing { animation: flap 0.19s ease-in-out infinite alternate; }
+.bat svg { animation: flap 0.19s ease-in-out infinite alternate; will-change: transform; }
 @keyframes flap {
   from { transform: scaleY(1); }
-  to { transform: scaleY(-0.4); }
+  to { transform: scaleY(0.35); }
 }
 @keyframes bat-ltr {
   from { transform: translateX(-60px); }
@@ -228,21 +229,19 @@ body {
   to { transform: translateY(11px) rotate(5deg); }
 }
 
-.vignette {
-  position: fixed;
-  inset: 0;
-  z-index: 4;
-  pointer-events: none;
-  background: radial-gradient(ellipse 125% 95% at 50% 38%, transparent 58%, rgba(0, 0, 0, 0.42) 100%);
-}
 canvas.spirits {
   position: fixed;
   inset: 0;
   z-index: 5;
+  display: none;
   width: 100%;
   height: 100%;
   pointer-events: none;
 }
+canvas.spirits.running { display: block; }
+
+/* After a while with no input the night holds still, so an idle tab costs nothing to show. */
+.still .scene *, .still .fog-front canvas, .still .flame, .still .lights i { animation-play-state: paused !important; }
 
 /* ------------------------------------------------------------ header */
 
@@ -267,8 +266,10 @@ canvas.spirits {
   margin: 10px auto 0;
   max-width: 54ch;
   color: var(--muted);
+  min-height: 3em;
   font-size: clamp(15px, 1.6vw, 17px);
   font-style: italic;
+  text-wrap: balance;
   text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
 }
 .tally {
@@ -383,18 +384,25 @@ canvas.spirits {
   z-index: 2;
   max-width: 1500px;
   margin: 0 auto;
-  padding: clamp(24px, 4.5vh, 48px) 16px 110px;
+  padding: calc(clamp(24px, 4.5vh, 48px) + var(--anchor, 0px)) 16px 110px;
   overflow-x: clip;
   flex: 1 0 auto;
   width: 100%;
 }
 .yard {
+  --face-max: 238px;
   position: relative;
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 206px), 268px));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 206px), 1fr));
   justify-content: center;
   gap: 44px 30px;
   align-items: end;
+}
+/* Many graves, or a narrow window: smaller stones, more of them to a row. */
+.yard.compact {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 140px), 1fr));
+  gap: 34px 18px;
+  --face-max: 182px;
 }
 
 .grave {
@@ -402,9 +410,12 @@ canvas.spirits {
   display: flex;
   flex-direction: column;
   align-items: center;
+
   min-width: 0;
   padding-bottom: 30px;
 }
+.grave:focus { outline: none; }
+.grave:focus-visible .carving { outline: 2px solid var(--ghost); outline-offset: 5px; border-radius: 10px; }
 .grave[hidden] { display: none; }
 .grave.leaving { position: absolute; margin: 0; pointer-events: none; }
 .grave.summoning, .grave.departing { z-index: 3; }
@@ -412,7 +423,7 @@ canvas.spirits {
 .plot {
   position: relative;
   z-index: 1;
-  width: calc(var(--w, 1) * min(100%, 238px));
+  width: calc(var(--w, 1) * min(100%, var(--face-max, 238px)));
   margin-bottom: calc(-1 * var(--sink, 0px));
   container-type: inline-size;
   /* The ground: anything below the plot's foot is underground. */
@@ -426,10 +437,17 @@ canvas.spirits {
 }
 .carving { position: relative; }
 .slab { position: absolute; inset: 0; display: block; width: 100%; height: 100%; overflow: visible; }
-.slab .grain { mix-blend-mode: soft-light; opacity: 0.9; }
-.slab .mottle { mix-blend-mode: soft-light; opacity: 0.75; }
-.slab .candlelight { opacity: 0; transition: opacity 0.6s; }
-.slab .spiritlight { opacity: 0; transition: opacity 0.7s var(--wave, 0ms); }
+.lights { position: absolute; inset: 0; pointer-events: none; }
+.lights i { position: absolute; inset: 0; opacity: 0; will-change: opacity; }
+.candlelight {
+  background: radial-gradient(circle at 102% 97%, rgba(255, 184, 98, 0.6), rgba(255, 156, 76, 0.22) 38%, rgba(255, 154, 74, 0) 85%);
+  transition: opacity 0.6s;
+}
+.candlelight.left { background-position: 0 0; background-image: radial-gradient(circle at -2% 97%, rgba(255, 184, 98, 0.6), rgba(255, 156, 76, 0.22) 38%, rgba(255, 154, 74, 0) 85%); }
+.spiritlight {
+  background: radial-gradient(ellipse at 50% 45%, rgba(230, 255, 243, 0.7), rgba(184, 255, 224, 0.3) 60%, rgba(159, 245, 212, 0.12));
+  transition: opacity 0.7s var(--wave, 0ms);
+}
 
 .inscription {
   --pad: 15;
@@ -441,8 +459,14 @@ canvas.spirits {
   padding: calc(var(--pad) * 1cqw + 11px) calc(var(--side) * 1cqw) calc(28px + var(--sink, 0px));
   color: var(--carve);
   text-align: center;
-  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.34);
+  text-shadow: var(--carve-shadow);
 }
+/* Lettering per stone: dark and cut into the pale stones, pale and cut into dark slate (all >= 4.5:1). */
+.grave { --carve: #0d0e11; --carve-shadow: 0 1px 0 rgba(255, 255, 255, 0.3); --carve-soft: rgba(0, 0, 0, 0.3); }
+.mat-limestone { --carve: #120d05; --carve-shadow: 0 1px 0 rgba(255, 244, 220, 0.3); }
+.mat-slate { --carve: #eef1f6; --carve-shadow: 0 -1px 0 rgba(0, 0, 0, 0.65); --carve-soft: rgba(230, 234, 242, 0.35); }
+.mat-marble { --carve: #15171c; }
+.mat-slate .rule::after { background: rgba(230, 234, 242, 0.5); box-shadow: -1px -1px 0 rgba(0, 0, 0, 0.5); }
 .shape-round .inscription { --pad: 13; }
 .shape-shoulder .inscription { --pad: 11; }
 .shape-gothic .inscription { --pad: 22; }
@@ -478,6 +502,7 @@ canvas.spirits {
 .name {
   margin: 0;
   max-width: 100%;
+  filter: grayscale(1);
   font: 700 16.5px/1.2 var(--serif);
   letter-spacing: 0.01em;
   overflow: hidden;
@@ -500,7 +525,7 @@ canvas.spirits {
   white-space: nowrap;
 }
 .site:hover { text-decoration: underline; text-underline-offset: 2px; }
-.site:focus-visible { outline: 2px solid #0d2a22; outline-offset: 2px; border-radius: 3px; }
+
 .rule {
   position: relative;
   width: 62%;
@@ -541,35 +566,37 @@ canvas.spirits {
   margin-top: 11px;
   text-shadow: none;
 }
+/* A recessed plaque cut into the stone, lit from within by a faint spectral glow. */
 .btn.raise {
-  padding: 7px 15px 7px 12px;
-  border: 1px solid rgba(165, 255, 218, 0.55);
-  background: linear-gradient(#143a31, #0b201b);
-  color: #dcfff0;
+  padding: 6px 14px 6px 11px;
+  border: 1px solid rgba(0, 0, 0, 0.5);
+  border-radius: 5px;
+  background: linear-gradient(#0c1f1b, #12302a);
+  color: #d4fbe8;
   font-size: 14px;
   font-weight: 600;
-  letter-spacing: 0.02em;
-  text-shadow: 0 0 7px rgba(160, 255, 215, 0.6);
-  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.3), 0 2px 6px rgba(0, 0, 0, 0.35), 0 0 14px rgba(110, 255, 200, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  letter-spacing: 0.03em;
+  text-shadow: 0 0 6px rgba(150, 255, 210, 0.55);
+  box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.65), inset 0 0 0 1px rgba(150, 255, 210, 0.16), 0 1px 0 rgba(255, 255, 255, 0.28);
 }
 .btn.raise:hover {
-  background: linear-gradient(#1a4a3e, #0f2a23);
-  border-color: rgba(200, 255, 232, 0.9);
-  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.3), 0 2px 6px rgba(0, 0, 0, 0.35), 0 0 22px rgba(110, 255, 200, 0.42), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+  color: #ecfff6;
+  box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.6), inset 0 0 14px rgba(120, 255, 200, 0.3), inset 0 0 0 1px rgba(170, 255, 220, 0.4), 0 1px 0 rgba(255, 255, 255, 0.3);
 }
+.btn[aria-disabled="true"] { cursor: default; opacity: 0.55; }
 .btn.forget {
   padding: 6px 10px;
   border: 0;
   background: transparent;
-  color: #1d1f25;
+  color: var(--carve);
   font-size: 13.5px;
   font-style: italic;
   text-decoration: underline;
-  text-decoration-color: rgba(0, 0, 0, 0.28);
+  text-decoration-color: var(--carve-soft);
   text-underline-offset: 3px;
-  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.3);
+  text-shadow: var(--carve-shadow);
 }
-.btn.forget:hover { color: #000; text-decoration-color: currentColor; background: rgba(255, 255, 255, 0.14); }
+.btn.forget:hover { text-decoration-color: currentColor; background: rgba(255, 255, 255, 0.12); }
 .actions .btn:focus-visible { outline: 2px solid #0b2a21; outline-offset: 2px; box-shadow: 0 0 0 4px rgba(190, 255, 226, 0.9); }
 
 .mound {
@@ -588,18 +615,19 @@ canvas.spirits {
   position: absolute;
   z-index: 3;
   bottom: 20px;
-  left: calc(50% + var(--w, 1) * min(100%, 238px) / 2 + 4px);
+  left: calc(50% + var(--w, 1) * min(100%, var(--face-max, 238px)) / 2 + 4px);
   width: 8px;
   height: 16px;
   border-radius: 2px 2px 1px 1px;
   background: linear-gradient(90deg, #5e5647, #c9bea3 38%, #ada287 66%, #554d40);
   box-shadow: 0 2px 3px rgba(0, 0, 0, 0.55);
   pointer-events: none;
-  filter: brightness(0.55);
-  transition: filter 0.4s;
+  opacity: 0;
+  translate: 0 4px;
+  transition: opacity 0.35s, translate 0.35s var(--ease-out);
 }
-.stone:hover .candle, .stone:has(:focus-visible) .candle, .candle.lit { filter: none; }
-.candle.left { left: auto; right: calc(50% + var(--w, 1) * min(100%, 238px) / 2 + 4px); }
+.stone:hover .candle, .stone:has(:focus-visible) .candle, .stone:focus-visible .candle, .candle.lit { opacity: 1; translate: 0 0; }
+.candle.left { left: auto; right: calc(50% + var(--w, 1) * min(100%, var(--face-max, 238px)) / 2 + 4px); }
 .candle::before {
   content: "";
   position: absolute;
@@ -636,15 +664,17 @@ canvas.spirits {
 }
 
 /* Hover or keyboard focus: the stone lifts a touch and a candle is lit for it. */
-.stone:hover .body, .stone:has(:focus-visible) .body { transform: translateY(-4px); }
-.stone:hover .fav, .stone:has(:focus-visible) .fav { filter: none; opacity: 1; }
-.stone:hover .flame, .stone:has(:focus-visible) .flame, .candle.lit .flame {
+.stone:hover .body, .stone:has(:focus-visible) .body, .stone:focus-visible .body { transform: translateY(-4px); }
+.stone:hover .fav, .stone:has(:focus-visible) .fav, .stone:focus-visible .fav { filter: none; opacity: 1; }
+.stone:has(:focus-visible) .name, .stone:focus-visible .name { -webkit-line-clamp: 8; }
+@media (hover: none) { .name { -webkit-line-clamp: 8; } }
+.stone:hover .flame, .stone:has(:focus-visible) .flame, .stone:focus-visible .flame, .candle.lit .flame {
   opacity: 1;
   scale: 1;
   animation: flicker 1.7s ease-in-out infinite;
 }
-.stone:hover .candlelight, .stone:has(:focus-visible) .candlelight, .blank .candlelight { opacity: 1; animation: glow 2.3s ease-in-out infinite; }
-.stone:hover .mound .warmth, .stone:has(:focus-visible) .mound .warmth, .blank .mound .warmth { opacity: 1; }
+.stone:hover .candlelight, .stone:has(:focus-visible) .candlelight, .stone:focus-visible .candlelight, .blank .candlelight { opacity: 1; animation: glow 2.3s ease-in-out infinite; }
+.stone:hover .mound .warmth, .stone:has(:focus-visible) .mound .warmth, .stone:focus-visible .mound .warmth, .blank .mound .warmth { opacity: 1; }
 @keyframes flicker {
   0%, 100% { transform: scaleY(1) skewX(0deg); }
   18% { transform: scaleY(1.12) skewX(2deg); }
@@ -689,11 +719,9 @@ canvas.spirits {
   translate: -50% 0;
   transform-origin: 50% 100%;
   pointer-events: none;
-  background: linear-gradient(to top, rgba(220, 255, 240, 0.6), rgba(175, 255, 224, 0.26) 25%, rgba(150, 255, 215, 0.07) 55%, transparent 85%);
-  -webkit-mask-image: linear-gradient(90deg, transparent, rgba(0, 0, 0, 0.5) 22%, #000 42%, #000 58%, rgba(0, 0, 0, 0.5) 78%, transparent);
-  mask-image: linear-gradient(90deg, transparent, rgba(0, 0, 0, 0.5) 22%, #000 42%, #000 58%, rgba(0, 0, 0, 0.5) 78%, transparent);
-  mix-blend-mode: screen;
+  background: radial-gradient(ellipse 50% 100% at 50% 100%, rgba(220, 255, 240, 0.5), rgba(175, 255, 224, 0.2) 35%, rgba(150, 255, 215, 0.05) 65%, rgba(150, 255, 215, 0) 90%);
   opacity: 0;
+  will-change: transform, opacity;
   animation: beam-in 0.8s var(--wave, 0ms) var(--ease-out) forwards;
 }
 .beam::before {
@@ -719,17 +747,13 @@ canvas.spirits {
 .summoning .spiritlight { opacity: 1; }
 .summoning .body { transform: translateY(-3px); }
 
-.ascend .carving {
-  -webkit-mask-image: linear-gradient(to top, transparent 0 34%, #000 62%);
-  mask-image: linear-gradient(to top, transparent 0 34%, #000 62%);
-  -webkit-mask-size: 100% 300%;
-  mask-size: 100% 300%;
-  animation: dissolve 1.5s cubic-bezier(0.45, 0, 0.6, 1) forwards;
-}
+/* The stone, washed in spirit light, lifts out of the ground and thins to nothing (transform and opacity only). */
+.ascend .carving { will-change: transform, opacity; animation: dissolve 1.5s cubic-bezier(0.45, 0, 0.6, 1) forwards; }
+.ascend .spiritlight { opacity: 1; }
 @keyframes dissolve {
-  0% { translate: 0 0; filter: brightness(1); -webkit-mask-position: 0 0; mask-position: 0 0; }
-  30% { filter: brightness(1.4); }
-  100% { translate: 0 -80px; filter: brightness(2); -webkit-mask-position: 0 100%; mask-position: 0 100%; }
+  0% { translate: 0 0; opacity: 1; }
+  30% { opacity: 0.95; }
+  100% { translate: 0 -90px; opacity: 0; }
 }
 .ascend .beam { animation: beam-out 1.5s ease-in forwards; }
 @keyframes beam-out {
@@ -739,7 +763,7 @@ canvas.spirits {
 }
 .ascend .mound, .ascend .candle { animation: vanish 0.6s 0.9s ease-in forwards; }
 
-.sink .carving { animation: sink 1.6s forwards; }
+.sink .carving { will-change: transform; animation: sink 1.6s forwards; }
 @keyframes sink {
   0% { translate: 0 0; animation-timing-function: linear; }
   6% { translate: -2px 1px; }
@@ -791,11 +815,26 @@ canvas.spirits {
   text-align: center;
 }
 
+.compact .name { font-size: 14.5px; }
+.compact .rip { font-size: 9px; letter-spacing: 0.26em; }
+.compact .inlay { width: 26px; height: 26px; margin: 4px 0 3px; }
+.compact .fav { width: 15px; height: 15px; }
+.compact .site { font-size: 11px; }
+.compact .rule { margin: 6px 0 5px; }
+.compact .epitaph { font-size: 11.5px; }
+/* The hour of death is left to screen readers when space is short. */
+.compact .died { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.compact .cause { margin-top: 1px; }
+.compact .actions { margin-top: 8px; }
+.compact .btn.raise { padding: 5px 11px 5px 9px; font-size: 13px; }
+.compact .btn.forget { padding: 4px 8px; font-size: 12.5px; }
+
 @media (max-width: 520px) {
   .tally { flex-wrap: nowrap; }
   .tally > div { flex: 1 1 0; padding: 0 8px; }
   .tally dt { font-size: 9.5px; letter-spacing: 0.1em; line-height: 1.3; }
   .yard { gap: 40px 20px; }
+  .yard.compact { gap: 30px 14px; }
   .moon { top: 12px; right: 12px; width: 40px; }
   .cloud { display: none; }
 }
@@ -803,7 +842,7 @@ canvas.spirits {
 /* ------------------------------------------------------------ calmer, for those who ask */
 
 @media (prefers-reduced-motion: reduce) {
-  .twinkles i, .cloud, .fog-layer canvas, .fog-front canvas, .flame, .slab .candlelight { animation: none !important; }
+  .twinkles i, .cloud, .fog-layer canvas, .fog-front canvas, .flame, .candlelight { animation: none !important; }
   .wisps, .bats { display: none; }
   .body { transition: none; }
   .stone:hover .body, .stone:has(:focus-visible) .body, .summoning .body { transform: none; }
@@ -811,6 +850,6 @@ canvas.spirits {
   .rising .actions { animation: none; }
   .beam { animation: appear 0.5s forwards; opacity: 1; transform: none; }
   .beam::after { display: none; }
-  .ascend .carving, .sink .carving, .fade .carving { -webkit-mask-image: none; mask-image: none; animation: vanish 0.6s ease forwards; }
+  .ascend .carving, .sink .carving, .fade .carving { animation: vanish 0.6s ease forwards; }
   .ascend .beam, .ascend .mound, .ascend .candle, .sink .mound, .sink .candle { animation: vanish 0.6s ease forwards; }
 }
