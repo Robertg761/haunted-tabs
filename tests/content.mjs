@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { chromium } from 'playwright-core';
 
 const pages = {
+  '/legacy': `<title>Legacy page</title><p>left haunted by an older version`,
   '/a': `<title>Real title</title><link rel="icon" href="/fav.svg"><link rel="apple-touch-icon" href="/t.png"><p>hi`,
   '/controls': `<title>Controls</title><input type="color"><input type="range"><input type="date" value="garbage"><input value="a&#10;b">
     <select><option>One<option>Two</select><select><option disabled>Pick<option>A<option>B</select><select multiple><option>x<option selected>y</select><textarea>hello</textarea>`,
@@ -92,6 +93,24 @@ try {
   check((await tab.title()) === 'Inbox (3)', `orphaned copy gives back the title when a fresh one arrives (${await tab.title()})`);
   check((await tab.evaluate(() => document.querySelectorAll('[data-haunted-tabs="cobwebs"]').length)) === 0, 'orphaned copy removes its webs');
   await orphan('/a', false);
+
+  // --- a copy of an older version: it left only `true` behind and keeps forcing its own ghost title.
+  await tab.goto(origin + '/legacy');
+  await sw.evaluate(async (url) => {
+    const [t] = await chrome.tabs.query({ url });
+    await chrome.scripting.executeScript({ target: { tabId: t.id }, func: () => {
+      window.__hauntedTabs = true;
+      const force = () => { if (document.title !== '👻 Old ghost') document.title = '👻 Old ghost'; };
+      new MutationObserver(force).observe(document.head, { childList: true, subtree: true, characterData: true });
+      force();
+    } });
+  }, origin + '/legacy');
+  r = await send('/legacy', { type: 'haunt:apply', title: '👻 New ghost', icon: 'data:,x' });
+  check(r?.ok === true, `a fresh copy takes over from an older version's marker (${JSON.stringify(r)})`);
+  const responsive = await Promise.race([tab.evaluate(() => 'alive'), sleep(3000).then(() => 'frozen')]);
+  check(responsive === 'alive', `fighting an old copy over the title never freezes the page (${responsive})`);
+  r = await send('/legacy', { type: 'haunt:restore' }, false);
+  check(r?.ok === true, 'and the fresh copy still answers');
 
   // --- unsaved input
   await tab.goto(origin + '/controls');

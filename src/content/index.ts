@@ -113,6 +113,19 @@ function setTitle(text: string): void {
   if (!sameTitle(document.title, text)) document.title = text;
 }
 
+/**
+ * Something keeps undoing our title as fast as we set it: a page script that
+ * forces its own, or a copy of an older version of this script left in the
+ * page by an update. Rather than fight it and freeze the page, let it win.
+ */
+let rewrites: number[] = [];
+function contested(): boolean {
+  const now = performance.now();
+  rewrites = rewrites.filter((t) => now - t < 1000);
+  rewrites.push(now);
+  return rewrites.length > 20;
+}
+
 /** An orphaned copy (the extension was reloaded or updated) can no longer be told to restore. */
 function alive(): boolean {
   try {
@@ -144,7 +157,7 @@ function watchHead(): void {
       if (ourIcon && (ourIcon.getAttribute('href') !== ghostIcon || ourIcon.rel !== 'icon')) adoptIcon(ourIcon);
       watchTitleElement();
       const current = document.title;
-      if (flickerTimer === undefined && !sameTitle(current, ghostTitle)) {
+      if (flickerTimer === undefined && !sameTitle(current, ghostTitle) && !contested()) {
         realTitle = current;
         reportRealTitle(current);
         setTitle(ghostTitle);
@@ -538,8 +551,10 @@ function onMessage(msg: PageCommand, _sender: chrome.runtime.MessageSender, send
 // a second copy must not double the listeners. A copy left behind by an
 // extension reload or update is told to let go first. It may share this window
 // (Chrome) or not (Firefox), so it hears that as a DOM event.
+// `true` is the marker an older version left: it can't be told to let go, but
+// it can no longer be reached either, so a fresh copy takes over the page.
 const previous = window.__hauntedTabs;
-if (!previous || (typeof previous === 'object' && !previous.alive())) {
+if (!previous || previous === true || !previous.alive()) {
   // Typing the old copy saw is still unsaved, whoever answers for the page now.
   if (typeof previous === 'object') dirtyByInput = !!previous.dirty?.();
   document.dispatchEvent(new CustomEvent(TAKEOVER));
