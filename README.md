@@ -34,7 +34,7 @@ Each stage also leaves its mark on the page, on top of what came before. Every e
 | 🥀 Withering | **Dust and decay** | Film grain, a yellowing vignette and paper-brown edges, with dust motes drifting in a shaft of light. Moving the mouse stirs the dust, and it settles again once you stop. |
 | 👻 Ghost | **Fogged glass** | Frost creeps in from the edges of the window like breath on cold glass. Moving the mouse wipes clear streaks with a wet edge. Beads of water collect, and now and then one runs down. Wiped areas slowly mist over again. Sometimes a handprint is left in the frost. |
 | 💀 Dead | **Eyes in the dark** | Darkness pools in an empty part of the page and a pair of eyes opens in it. They follow your cursor, blink and squint. They shut the moment you go for them, then open somewhere else. They only ever use empty space, so they never cover content. An entombed tab gets a second, fainter pair. |
-| ⚰️ Entombed | **Drips** | Dark, viscous drips run down from the top edge and pool at the bottom until you scroll them away. |
+| ⚰️ Entombed | **Drips** | A dark, glossy liquid gathers along the top of the window, swells into beads and runs down in fits and starts. The trails thin, dry and go matte, and it collects in a thin film along the bottom that ripples when a drop lands. Drips only run where there is no text. Scrolling drags them along and sloshes the pool, and a fast scroll wipes it all away in streaks. |
 
 Two more belong to the **poltergeist**. They are rare, happen only on the tab you're reading, and never stack:
 
