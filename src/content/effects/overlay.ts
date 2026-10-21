@@ -138,3 +138,30 @@ export function seeded(seed: number): () => number {
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
 }
+
+/** A viewport rectangle in CSS pixels. */
+export interface Area {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/**
+ * Where each creature has settled on screen, so the others keep out of its way
+ * (drips don't run through the eyes' darkness, webs don't string across them).
+ * Each owner replaces its own list whenever it moves and clears it when it goes.
+ */
+const claimed = new Map<string, Area[]>();
+
+export function claimAreas(owner: string, areas: Area[]): void {
+  if (areas.length) claimed.set(owner, areas);
+  else claimed.delete(owner);
+}
+
+/** Everything claimed by owners other than `owner`. */
+export function areasTaken(owner: string): Area[] {
+  const out: Area[] = [];
+  for (const [name, areas] of claimed) if (name !== owner) out.push(...areas);
+  return out;
+}

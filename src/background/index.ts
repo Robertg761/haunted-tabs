@@ -527,8 +527,8 @@ const WEBS_BY_STAGE: Record<Stage, number> = {
   [Stage.Alive]: 0,
   [Stage.Withering]: 2,
   [Stage.Ghost]: 3,
-  [Stage.Dead]: 5,
-  [Stage.Entombed]: 7,
+  [Stage.Dead]: 4,
+  [Stage.Entombed]: 5,
 };
 /** Page effects that greet you on return, and the stage each one starts at. */
 const STAGE_EFFECTS: [EffectName, Stage][] = [
