@@ -388,6 +388,23 @@ class Watcher {
     this.blinkAt = this.squintAt = -1e9;
   }
 
+  /**
+   * Asked back while closing for a stop: finish shutting as if chased off, then
+   * open again later. Pairs that had already gone wait to open again.
+   */
+  revive(reopenIn: number): void {
+    this.final = false;
+    if (this.phase === 'closing') {
+      this.phase = 'retreating';
+      this.reopenDelay = reopenIn;
+    } else if (this.phase === 'done') {
+      this.phase = 'waiting';
+      this.planState = 'none';
+      this.plan = null;
+      this.wakeAt = this.main ? this.host.clock + reopenIn : Infinity;
+    }
+  }
+
   private hide(): void {
     this.el.style.display = 'none';
   }
@@ -708,7 +725,7 @@ class Watcher {
       const b = this.blinkFactor(now - this.blinkAt - e.lag);
       let up = env * b * (1 - 0.36 * squint) * e.droop;
       // Startle: they fly wide for an instant before they shut.
-      if (this.phase === 'retreating' && !reduced && t < 45) up = lerp(this.env0, this.startle, t / 45) * e.droop;
+      if (this.phase === 'retreating' && this.closeKind === 'retreat' && !reduced && t < 45) up =lerp(this.env0, this.startle, t / 45) * e.droop;
       e.up = up;
       e.lo = clamp01(lerp(0.68, 1, Math.min(1, (env / REST) * b)) - 0.46 * squint);
 
@@ -850,14 +867,16 @@ class Watcher {
     let oy = 0;
     let op: number;
     if (dissolving) {
-      // It contracts and sinks away rather than spreading into grey.
-      s = 0.35 + 0.65 * p;
-      oy = (1 - p) * 0.3 * this.w;
-      op = smooth(Math.min(1, p * 1.8));
+      // It thins and sinks away, mostly gone before it has shrunk much, so it
+      // never ends as a small grey pebble.
+      s = 0.6 + 0.4 * p;
+      oy = (1 - p) * 0.25 * this.w;
+      op = smooth(clamp01((p - 0.1) / 0.6));
     } else {
-      // It seeps out from where the eyes will be.
-      s = 0.15 + 0.85 * easeOutCubic(p);
-      op = smooth(Math.min(1, p * 3));
+      // It condenses out of the air where the eyes will be: it thickens while
+      // it draws together, rather than inflating as a grey disc.
+      s = 0.55 + 0.45 * easeOutCubic(p);
+      op = smooth(Math.min(1, p * 1.5));
     }
     const settled = this.phase === 'watching';
     // Slow breathing; while settled it only moves with the (rare) redraws below.
@@ -1093,6 +1112,8 @@ export class Eyes implements Effect, Host {
   seed = 0;
   palette: Palette = PALETTES[0];
   clock = 0;
+  /** Clock time the current lifetime began (a revive starts a new one). */
+  private born = 0;
   rand: () => number = Math.random;
 
   private overlay: Overlay | null = null;
@@ -1130,6 +1151,23 @@ export class Eyes implements Effect, Host {
       }
       return;
     }
+    if (this.overlay && !this.paused) {
+      // Started again while fading out: the darkness on screen finishes closing
+      // and the eyes come back later, with a fresh lifetime, instead of the
+      // whole thing vanishing in one frame and starting over.
+      clearTimeout(this.stopTimer);
+      this.stopTimer = undefined;
+      this.stopping = this.ending = false;
+      this.born = this.clock;
+      this.retreats = 0;
+      for (const w of this.watchers) w.revive(1800 + this.rand() * 900);
+      if (ctx.stage >= 4 && this.stage < 4) {
+        this.stage = ctx.stage;
+        this.addSecondary();
+      }
+      this.schedule();
+      return;
+    }
     if (this.overlay) this.destroy();
     this.reduced = ctx.reduced;
     this.stage = ctx.stage;
@@ -1137,7 +1175,7 @@ export class Eyes implements Effect, Host {
     this.rand = seeded(this.seed ^ 0x9e3779b9);
     this.palette = PALETTES[this.seed % PALETTES.length];
     this.dpr = Math.min(2, devicePixelRatio || 1);
-    this.clock = 0;
+    this.clock = this.born = 0;
     this.lastReal = performance.now();
     this.paused = document.visibilityState === 'hidden';
     this.stopping = this.ending = false;
@@ -1376,7 +1414,7 @@ export class Eyes implements Effect, Host {
     const dt = Math.min(0.05, Math.max(0, (now - prev) / 1000));
     const p = this.pointer;
     if (performance.now() - p.at > 120) p.vx = p.vy = 0;
-    if (!this.ending && !this.stopping && now > LIFETIME) {
+    if (!this.ending && !this.stopping && now - this.born > LIFETIME) {
       this.ending = true;
       this.cancelJob();
       for (const w of this.watchers) w.close('final');
@@ -1425,7 +1463,7 @@ export class Eyes implements Effect, Host {
       return;
     }
     if (this.raf || this.calmTimer) return;
-    let next = this.ending || this.stopping ? this.clock : LIFETIME;
+    let next = this.ending || this.stopping ? this.clock : this.born + LIFETIME;
     for (const w of this.watchers) {
       if (w.phase !== 'waiting' || w.planState === 'pending') continue;
       next = Math.min(next, w.planState === 'none' ? w.wakeAt - PLAN_AHEAD : w.wakeAt);
