@@ -1,14 +1,14 @@
 // Something behind the text: once, while you read, a tall gaunt figure walks past
-// behind the page. It slows near the middle, turns its head toward you, then
-// walks on and is gone.
+// behind the page. It slows near the middle, turns its head to look at you, and
+// keeps looking for its first steps as it walks on and is gone.
 //
 // Nothing can really be drawn behind a page, so it is faked. The figure is drawn
 // small and soft on a little canvas, scaled up and blended with the page:
 //  - on light pages with `multiply`, which darkens the background but leaves dark
 //    text as dark as it was, so the text seems to sit in front of the shadow;
-//  - on dark pages with `lighten`, as a faint cold rim of light around a figure
-//    standing in front of it. Light text is brighter than the rim, so it stays
-//    exactly as it was and again reads as in front.
+//  - on dark pages with `lighten`, as a faint cold haze around a figure standing
+//    in front of it. Light text is brighter than the haze, so it stays exactly as
+//    it was and again reads as in front.
 // The blur changes with depth: as the figure leans in toward the glass it gets
 // sharper and darker, like a shadow through frosted glass.
 
@@ -20,10 +20,12 @@ interface Pt {
   y: number;
 }
 
-type Phase = 'idle' | 'waiting' | 'walking';
+type Phase = 'idle' | 'waiting' | 'probing' | 'walking';
 
 /** Longest wait for the user to scroll or move before it walks anyway (ms). */
-const MAX_WAIT = 1400;
+const MAX_WAIT = 700;
+/** How long the blend cost is measured before the walk (s). */
+const PROBE = 0.4;
 /** Seconds spent slowing to a stop, and getting going again. */
 const DECEL = 1.0;
 const ACCEL = 0.9;
@@ -31,13 +33,22 @@ const ACCEL = 0.9;
 const FADE_IN = 0.9;
 const FADE_OUT = 1.0;
 const STOP_FADE = 0.9;
+/** Fade back in after the tab was hidden for a while. */
+const REVEAL = 0.4;
 /** The figure box, in units of the figure's height, and where its feet sit in it. */
 const BOX_W = 1.0;
 const BOX_H = 1.3;
 const ORIGIN_X = 0.5;
 const ORIGIN_Y = 1.15;
+/**
+ * Where the walk starts and ends, beyond the viewport edge, in figure heights.
+ * The blurred arm reach is about 0.32, so this is just out of sight.
+ */
+const MARGIN = 0.4;
 /** Canvas pixels per figure height. The blur hides the low resolution. */
 const RES = 240;
+/** Frame-time samples kept for the blend decision. */
+const PERF_N = 90;
 
 const TAU = Math.PI * 2;
 const clamp = (v: number, lo: number, hi: number) => (v < lo ? lo : v > hi ? hi : v);
@@ -56,15 +67,6 @@ function blurFilter(px: number): string {
   return (blurCache[i] ??= `blur(${(i * BLUR_STEPS).toFixed(2)}px)`);
 }
 
-/** Parse a computed CSS colour into [r, g, b, a] (0..255, alpha 0..1). */
-function parseColor(s: string): [number, number, number, number] | null {
-  const m = s.match(/-?[\d.]+(e-?\d+)?%?/g);
-  if (!m || m.length < 3) return null;
-  const n = m.map((v) => parseFloat(v));
-  const scale = s.startsWith('color(') ? 255 : 1;
-  return [n[0] * scale, n[1] * scale, n[2] * scale, n.length > 3 ? n[3] : 1];
-}
-
 function luminance(r: number, g: number, b: number): number {
   const ch = (c: number) => {
     const v = c / 255;
@@ -73,29 +75,71 @@ function luminance(r: number, g: number, b: number): number {
   return 0.2126 * ch(r) + 0.7152 * ch(g) + 0.0722 * ch(b);
 }
 
-/** Is what sits behind the reading area light? Sampled once, where the figure will pass. */
+/** Median of the first n samples, ignoring single hitches over 50 ms. */
+function median(src: Float32Array, n: number): number {
+  const v: number[] = [];
+  for (let i = 0; i < n; i++) if (src[i] <= 50) v.push(src[i]);
+  if (!v.length) return 0;
+  v.sort((a, b) => a - b);
+  return v[v.length >> 1];
+}
+
+/**
+ * Is what sits behind the figure's head and body light? Sampled once, as it
+ * starts walking. Colours go through a 1x1 canvas, so any CSS colour syntax
+ * (oklch, lab, color-mix…) is read correctly.
+ */
 function pageIsLight(): boolean {
+  const probe = document.createElement('canvas');
+  probe.width = probe.height = 1;
+  const pc = probe.getContext('2d', { willReadFrequently: true });
+  const SENTINEL = '#010203';
+  const rgba = (css: string): Uint8ClampedArray | null => {
+    if (!pc) return null;
+    pc.fillStyle = SENTINEL;
+    pc.fillStyle = css;
+    if (pc.fillStyle === SENTINEL && css.replace(/\s/g, '') !== 'rgb(1,2,3)') return null;
+    pc.clearRect(0, 0, 1, 1);
+    pc.fillRect(0, 0, 1, 1);
+    return pc.getImageData(0, 0, 1, 1).data;
+  };
+
   let total = 0;
-  let count = 0;
+  let weight = 0;
+  let sawImage = false;
   const w = innerWidth;
   const h = innerHeight;
-  for (const fx of [0.2, 0.5, 0.8]) {
-    for (const fy of [0.3, 0.6, 0.85]) {
-      let el: Element | null = document.elementFromPoint(w * fx, h * fy);
+  // Mostly the band where the head and shoulders pass, a little lower down.
+  const rows = [0.18, 0.3, 0.42, 0.65];
+  const rowWeight = [1, 1, 1, 0.4];
+  for (let r = 0; r < rows.length; r++) {
+    for (const fx of [0.2, 0.5, 0.8]) {
+      let el: Element | null = document.elementFromPoint(w * fx, h * rows[r]);
       while (el) {
-        const c = parseColor(getComputedStyle(el).backgroundColor);
-        if (c && c[3] > 0.5) {
-          total += luminance(c[0], c[1], c[2]);
-          count++;
+        const cs = getComputedStyle(el);
+        // An image or gradient could be any colour: this sample says nothing.
+        if (cs.backgroundImage && cs.backgroundImage !== 'none') {
+          sawImage = true;
+          break;
+        }
+        const c = rgba(cs.backgroundColor);
+        if (c && c[3] > 128) {
+          total += luminance(c[0], c[1], c[2]) * rowWeight[r];
+          weight += rowWeight[r];
           break;
         }
         el = el.parentElement;
       }
     }
   }
-  if (count) return total / count > 0.3;
-  // Nothing painted a background: the browser's canvas shows, which is dark
-  // only when the page opted into a dark colour scheme.
+  if (weight > 0.5) return total / weight > 0.3;
+  // Only images behind it: `multiply` shows on light and mid-tone images and
+  // simply fades away on very dark ones, which is the safer way to be wrong.
+  if (sawImage) return true;
+  // Nothing painted at all. Light text means a dark page, and dark text a light one.
+  const text = document.body ? rgba(getComputedStyle(document.body).color) : null;
+  if (text && text[3] > 128) return luminance(text[0], text[1], text[2]) < 0.4;
+  // The browser's canvas shows, which is dark only if the page opted into a dark scheme.
   const scheme = getComputedStyle(document.documentElement).colorScheme || '';
   return !(/dark/.test(scheme) && matchMedia('(prefers-color-scheme: dark)').matches);
 }
@@ -109,16 +153,25 @@ export class Shadow implements Effect {
   private vctx: CanvasRenderingContext2D | null = null;
   private sharp: HTMLCanvasElement | null = null;
   private sctx: CanvasRenderingContext2D | null = null;
+  private headSharp: HTMLCanvasElement | null = null;
+  private hctx: CanvasRenderingContext2D | null = null;
   private canFilter = true;
   private legFade: CanvasGradient | null = null;
-  // Blend modes push the page through an extra compositing pass. On a GPU that
-  // is nothing; on a software compositor it can halve the frame rate, so frame
-  // times are watched and the blend is dropped if it gets slow. Over plain
-  // backgrounds the dark shadow (or the cold haze on dark pages) looks the same
-  // either way; only text and saturated colours lose a little.
-  private perfFrames = 0;
-  private perfTime = 0;
-  private perfDone = false;
+
+  // Blend modes push the page through an extra compositing pass, costing in
+  // proportion to the blended area on screen. On a GPU that is nothing; on a
+  // software compositor it can cut the frame rate to a fraction. So it is
+  // decided once, before anything can be seen: frame times while waiting (no
+  // overlay) are the baseline; then, for PROBE seconds, the box sits mid-screen
+  // at an invisible opacity, nudged each frame so it really is recomposited,
+  // and those frame times are compared with the baseline.
+  private baseIv = new Float32Array(PERF_N);
+  private baseN = 0;
+  private probeIv = new Float32Array(PERF_N);
+  private probeN = 0;
+  private baseRaf = 0;
+  private baseLast = 0;
+  private probeStart = 0;
   private blendK = 1;
 
   private raf = 0;
@@ -127,6 +180,8 @@ export class Shadow implements Effect {
   private killTimer: number | undefined;
   private listening = false;
   private startedAt = 0;
+  private hiddenAt = 0;
+  private revealAt = -1;
 
   private reduced = false;
   private light = true;
@@ -160,6 +215,9 @@ export class Shadow implements Effect {
   private stride = 1;
   private phase0 = 0;
   private holdX = 0;
+  // Written by travelled().
+  private dist = 0;
+  private walkK = 0;
 
   // Per-tab variety.
   private armK = 1;
@@ -191,6 +249,8 @@ export class Shadow implements Effect {
   private readonly an = [this.pt(), this.pt()];
   private readonly toe = [this.pt(), this.pt()];
   private readonly torso = Array.from({ length: 10 }, () => this.pt());
+  private headRot = 0;
+  private faceHead = 0;
 
   get active(): boolean {
     return this.phase !== 'idle';
@@ -203,28 +263,29 @@ export class Shadow implements Effect {
     this.reduced = ctx.reduced;
     this.rand = seeded((ctx.seed ^ 0x5badc0de) >>> 0);
     this.intensity = clamp(0.85 + 0.05 * ctx.stage, 0.85, 1.05);
-    this.light = pageIsLight();
     this.startedAt = performance.now();
+    this.baseN = 0;
     this.listen(true);
     this.armWait();
   }
 
   stop(): void {
     if (this.phase === 'idle') return;
-    if (this.phase === 'waiting' || document.hidden || !this.overlay) {
+    if (this.phase !== 'walking' || document.hidden || !this.overlay) {
       this.destroy();
       return;
     }
     if (this.stopAt < 0) this.stopAt = this.t;
-    clearTimeout(this.killTimer);
-    this.killTimer = window.setTimeout(() => this.destroy(), 1500);
+    // The hard deadline is set once; asking again does not push it back.
+    this.killTimer ??= window.setTimeout(() => this.destroy(), 1500);
     this.wake();
   }
 
   destroy(): void {
     this.phase = 'idle';
     cancelAnimationFrame(this.raf);
-    this.raf = 0;
+    cancelAnimationFrame(this.baseRaf);
+    this.raf = this.baseRaf = 0;
     clearTimeout(this.waitTimer);
     clearTimeout(this.beginTimer);
     clearTimeout(this.killTimer);
@@ -233,21 +294,35 @@ export class Shadow implements Effect {
     this.overlay?.remove();
     this.overlay = null;
     this.box = null;
-    this.sharp = null;
+    this.sharp = this.headSharp = null;
+    this.vctx = this.sctx = this.hctx = null;
     this.legFade = null;
-    this.vctx = this.sctx = null;
     this.stopAt = -1;
+    this.revealAt = -1;
+    this.lookX = this.lookY = this.parallax = 0;
   }
 
   // ---------------------------------------------------------------------------
   // Waiting: it is best glimpsed while you read, so it waits for a scroll or a
-  // move, but not for long.
+  // move, but not for long. Meanwhile frame times give the blend baseline.
 
   private armWait(): void {
     clearTimeout(this.waitTimer);
     if (document.hidden) return; // visibilitychange re-arms it
     this.waitTimer = window.setTimeout(() => this.begin(), MAX_WAIT);
+    if (!this.baseRaf) {
+      this.baseLast = 0;
+      this.baseRaf = requestAnimationFrame(this.baseFrame);
+    }
   }
+
+  private baseFrame = (now: number): void => {
+    this.baseRaf = 0;
+    if (this.phase !== 'waiting' || document.hidden) return;
+    if (this.baseLast && this.baseN < PERF_N) this.baseIv[this.baseN++] = now - this.baseLast;
+    this.baseLast = now;
+    this.baseRaf = requestAnimationFrame(this.baseFrame);
+  };
 
   private onActivity = (): void => {
     if (this.phase !== 'waiting' || this.beginTimer !== undefined || document.hidden) return;
@@ -269,20 +344,31 @@ export class Shadow implements Effect {
 
   private onVisibility = (): void => {
     if (document.hidden) {
+      this.hiddenAt = performance.now();
       cancelAnimationFrame(this.raf);
-      this.raf = 0;
+      cancelAnimationFrame(this.baseRaf);
+      this.raf = this.baseRaf = 0;
       clearTimeout(this.waitTimer);
       return;
     }
-    if (this.phase === 'waiting') this.armWait();
-    else this.wake();
+    if (this.phase === 'waiting') {
+      this.armWait();
+    } else if (this.phase === 'probing') {
+      this.startProbe();
+    } else if (this.phase === 'walking') {
+      // Away for more than a moment: ease back in instead of popping up.
+      if (performance.now() - this.hiddenAt > 1000) this.revealAt = this.t;
+      this.wake();
+    }
   };
 
   private onResize = (): void => {
     if (this.phase !== 'walking') return;
     const r = innerWidth / (this.vw || innerWidth);
+    const phi = this.phase0 + (TAU * this.dist) / this.stride;
     this.layout();
-    // Keep the timing, stretch the path to the new width.
+    // Keep the timing, stretch the path to the new width, and keep the gait
+    // where it was: distances scale by r, the stride follows the new height.
     this.x0 *= r;
     this.xP *= r;
     this.x1 *= r;
@@ -290,6 +376,8 @@ export class Shadow implements Effect {
     this.run1 *= r;
     this.run2 *= r;
     this.holdX *= r;
+    this.stride = 0.86 * this.figH;
+    this.phase0 = phi - (TAU * this.dist * r) / this.stride;
     this.wake();
   };
 
@@ -314,23 +402,27 @@ export class Shadow implements Effect {
     if (this.phase !== 'waiting') return;
     clearTimeout(this.waitTimer);
     clearTimeout(this.beginTimer);
+    cancelAnimationFrame(this.baseRaf);
     this.waitTimer = this.beginTimer = undefined;
+    this.baseRaf = 0;
     this.phase = 'walking';
+    // Sampled now, after any scroll, so it is what the figure will pass behind.
+    this.light = pageIsLight();
 
     const r = this.rand;
     this.armK = 0.97 + r() * 0.1;
     this.legK = 0.98 + r() * 0.05;
     this.hunch = 0.15 + r() * 0.12;
     this.cockSide = r() < 0.5 ? -1 : 1;
-    this.cockAmt = 0.1 + r() * 0.08;
+    this.cockAmt = 0.12 + r() * 0.08;
     this.phase0 = r() * TAU;
     this.dir = r() < 0.5 ? 1 : -1;
     const stopAt = 0.42 + r() * 0.16;
-    const pause = 1.0 + r() * 0.5;
+    const pause = 1.5 + r() * 0.3;
 
     this.layout();
     const H = this.figH;
-    const margin = ORIGIN_X * H + 0.12 * H;
+    const margin = MARGIN * H;
     if (this.dir > 0) {
       this.x0 = -margin;
       this.xP = this.vw * stopAt;
@@ -345,9 +437,9 @@ export class Shadow implements Effect {
     // A slow, deliberate walk: about two seconds to reach the middle.
     const d1 = Math.abs(this.xP - this.x0);
     const d2 = Math.abs(this.x1 - this.xP);
-    this.speed = clamp(d1 / (2.15 - DECEL / 2), 0.32 * H, 0.72 * H);
-    this.run1 = d1 - (this.speed * DECEL) / 2;
-    this.run2 = d2 - (this.speed * ACCEL) / 2;
+    this.speed = clamp(d1 / (1.95 - DECEL / 2), 0.32 * H, 0.85 * H);
+    this.run1 = Math.max(0, d1 - (this.speed * DECEL) / 2);
+    this.run2 = Math.max(0, d2 - (this.speed * ACCEL) / 2);
     this.tDecel = this.run1 / this.speed;
     this.tStop = this.tDecel + DECEL;
     this.tResume = this.tStop + pause;
@@ -381,29 +473,63 @@ export class Shadow implements Effect {
     sharp.height = view.height;
     this.sharp = sharp;
     this.sctx = sharp.getContext('2d');
-    if (this.sctx) {
-      // Solid down to the knees, thinning toward the feet.
-      const g = this.sctx.createLinearGradient(0, (ORIGIN_Y - 0.3) * RES, 0, ORIGIN_Y * RES);
-      g.addColorStop(0, 'rgba(0,0,0,1)');
-      g.addColorStop(1, 'rgba(0,0,0,0.4)');
-      this.legFade = g;
-    }
-    if (!this.vctx || !this.sctx) {
+    const headSharp = document.createElement('canvas');
+    headSharp.width = view.width;
+    headSharp.height = view.height;
+    this.headSharp = headSharp;
+    this.hctx = headSharp.getContext('2d');
+    if (!this.vctx || !this.sctx || !this.hctx) {
       this.destroy();
       return;
     }
+    // Solid down to the knees, thinning toward the feet.
+    const g = this.sctx.createLinearGradient(0, (ORIGIN_Y - 0.3) * RES, 0, ORIGIN_Y * RES);
+    g.addColorStop(0, 'rgba(0,0,0,1)');
+    g.addColorStop(1, 'rgba(0,0,0,0.4)');
+    this.legFade = g;
     this.canFilter = typeof this.vctx.filter === 'string';
     if (!this.canFilter) view.style.filter = 'blur(6px)';
     this.sizeView();
 
-    this.t = 0;
-    this.perfFrames = 0;
-    this.perfTime = 0;
-    this.perfDone = false;
     this.blendK = 1;
-    this.lastNow = performance.now();
-    this.wake();
+    this.phase = 'probing';
+    this.t = 0;
+    this.travelled(0);
+    this.pose(1, this.phase0, 0, 0, 0, 0);
+    this.faceHead = 0;
+    this.paint(0.5);
+    this.startProbe();
   }
+
+  private startProbe(): void {
+    this.probeN = 0;
+    this.probeStart = 0;
+    if (document.hidden) return; // visibilitychange restarts it
+    this.lastNow = 0;
+    this.raf = requestAnimationFrame(this.probeFrame);
+  }
+
+  private probeFrame = (now: number): void => {
+    this.raf = 0;
+    if (this.phase !== 'probing' || !this.box) return;
+    if (this.lastNow && this.probeN < PERF_N) this.probeIv[this.probeN++] = now - this.lastNow;
+    this.lastNow = now;
+    this.probeStart ||= now;
+    if (now - this.probeStart >= PROBE * 1000) {
+      this.decideBlend();
+      this.phase = 'walking';
+      this.lastNow = now;
+      this.render(0, 1);
+      this.raf = requestAnimationFrame(this.frame);
+      return;
+    }
+    // Mid-screen, the size it will be, far too faint to see.
+    const H = this.figH;
+    const nudge = this.probeN & 1 ? 0.5 : 0;
+    this.box.style.transform = `translate3d(${(this.vw / 2 - ORIGIN_X * H + nudge).toFixed(1)}px,${(this.feetY - ORIGIN_Y * H).toFixed(1)}px,0)`;
+    this.box.style.opacity = '0.002';
+    this.raf = requestAnimationFrame(this.probeFrame);
+  };
 
   private layout(): void {
     this.vw = innerWidth;
@@ -432,7 +558,6 @@ export class Shadow implements Effect {
     const dt = clamp((now - this.lastNow) / 1000, 0, 0.1);
     this.lastNow = now;
     this.t += dt;
-    if (!this.perfDone) this.checkPerf(dt);
 
     const fadeOut = this.stopAt >= 0 ? 1 - smooth(0, STOP_FADE, this.t - this.stopAt) : 1;
     if (this.t >= this.tEnd || fadeOut <= 0) {
@@ -443,37 +568,45 @@ export class Shadow implements Effect {
     this.raf = requestAnimationFrame(this.frame);
   };
 
-  private checkPerf(dt: number): void {
-    if (this.t < 0.2) return;
-    this.perfFrames++;
-    this.perfTime += dt;
-    if (this.perfTime < 0.5) return;
-    // Half a second at under ~40 fps: blend no more, for the rest of the walk.
-    if (this.perfTime / this.perfFrames > 1 / 40) {
-      this.perfDone = true;
-      if (this.box) this.box.style.mixBlendMode = 'normal';
-      // Without `lighten` the haze would veil text and bright colours: thin it.
-      if (!this.light) this.blendK = 0.65;
-    }
-    this.perfFrames = 0;
-    this.perfTime = 0;
+  /** Once: keep the blend unless frames got clearly slower with it on. */
+  private decideBlend(): void {
+    if (this.baseN < 8 || this.probeN < 8) return;
+    if (this.isSlow(median(this.baseIv, this.baseN), median(this.probeIv, this.probeN))) this.dropBlend();
+  }
+
+  private isSlow(base: number, walk: number): boolean {
+    return walk > base * 1.5 && walk > 28;
+  }
+
+  private dropBlend(): void {
+    if (this.box) this.box.style.mixBlendMode = 'normal';
+    // Without `lighten` the haze would veil text and bright colours: thin it.
+    // Nothing is visible yet, so there is no switch to see.
+    this.blendK = this.light ? 1 : 0.75;
   }
 
   /** Distance along the path at time t, and how hard it is walking (0..1). */
-  private travelled(t: number): [number, number] {
+  private travelled(t: number): void {
     const v = this.speed;
-    if (t < this.tDecel) return [v * t, 1];
-    if (t < this.tStop) {
-      const u = (t - this.tDecel) / DECEL;
-      return [this.run1 + v * DECEL * (u - smoothInt(u)), 1 - smooth(0, 1, u)];
-    }
     const d1 = this.run1 + (v * DECEL) / 2;
-    if (t < this.tResume) return [d1, 0];
-    if (t < this.tGo) {
+    if (t < this.tDecel) {
+      this.dist = v * t;
+      this.walkK = 1;
+    } else if (t < this.tStop) {
+      const u = (t - this.tDecel) / DECEL;
+      this.dist = this.run1 + v * DECEL * (u - smoothInt(u));
+      this.walkK = 1 - smooth(0, 1, u);
+    } else if (t < this.tResume) {
+      this.dist = d1;
+      this.walkK = 0;
+    } else if (t < this.tGo) {
       const u = (t - this.tResume) / ACCEL;
-      return [d1 + v * ACCEL * smoothInt(u), smooth(0, 1, u)];
+      this.dist = d1 + v * ACCEL * smoothInt(u);
+      this.walkK = smooth(0, 1, u);
+    } else {
+      this.dist = d1 + (v * ACCEL) / 2 + v * (t - this.tGo);
+      this.walkK = 1;
     }
-    return [d1 + (v * ACCEL) / 2 + v * (t - this.tGo), 1];
   }
 
   private render(dt: number, fadeOut: number): void {
@@ -494,30 +627,34 @@ export class Shadow implements Effect {
       walk = 0;
       phi = 0;
       faceTorso = 0.3;
-      faceHead = 0.55 + 0.35 * smooth(1.2, 3.2, t);
-      cock = smooth(2.0, 4.0, t);
-      z = 0.3 + 0.4 * smooth(0, 4, t);
+      faceHead = 0.6 + 0.4 * smooth(1.0, 2.8, t);
+      cock = smooth(2.2, 4.0, t);
+      z = 0.3 + 0.45 * smooth(0, 3.5, t);
       env = smooth(0, 1.8, t) * (1 - smooth(this.tEnd - 1.8, this.tEnd, t));
     } else {
-      const [dist, w] = this.travelled(t);
-      x = this.x0 + this.dir * dist;
-      walk = w;
-      phi = this.phase0 + (TAU * dist) / this.stride;
-      // It notices you as it slows; the head turns first and the shoulders follow.
-      const turnIn = smooth(this.tStop - 0.45, this.tStop + 0.35, t);
-      const turnBack = smooth(this.tResume - 0.4, this.tResume + 0.35, t);
-      faceHead = 0.92 * turnIn * (1 - turnBack);
-      faceTorso = 0.62 * smooth(this.tStop - 0.15, this.tStop + 0.7, t) * (1 - smooth(this.tResume - 0.55, this.tResume + 0.1, t));
-      cock = smooth(this.tStop + 0.35, this.tStop + 1.0, t) * (1 - smooth(this.tResume - 0.45, this.tResume, t));
+      this.travelled(t);
+      x = this.x0 + this.dir * this.dist;
+      walk = this.walkK;
+      phi = this.phase0 + (TAU * this.dist) / this.stride;
+      const ts = this.tStop;
+      const tr = this.tResume;
+      // It notices you as it slows. The head turns first; the shoulders follow a
+      // beat later. It holds the look, and the head stays on you for its first
+      // steps as it walks on.
+      faceHead = smooth(ts - 0.5, ts + 0.2, t) * (1 - smooth(tr + 0.45, tr + 1.2, t));
+      faceTorso = 0.62 * smooth(ts + 0.35, ts + 1.0, t) * (1 - smooth(tr - 0.5, tr + 0.1, t));
+      cock = smooth(ts + 0.6, ts + 1.2, t) * (1 - smooth(tr + 0.3, tr + 0.9, t));
       // Depth: it drifts nearer the glass, leans in while it looks, then recedes.
       z =
         0.3 +
-        0.35 * smooth(0, this.tStop, t) +
-        0.3 * smooth(this.tStop, this.tStop + 0.8, t) * (1 - smooth(this.tResume - 0.4, this.tResume + 0.3, t)) -
-        0.5 * smooth(this.tResume, this.tEnd, t);
+        0.35 * smooth(0, ts, t) +
+        0.3 * smooth(ts + 0.2, ts + 1.0, t) * (1 - smooth(tr - 0.3, tr + 0.5, t)) -
+        0.5 * smooth(tr, this.tEnd, t);
       env = smooth(0, FADE_IN, t) * (1 - smooth(this.tEnd - FADE_OUT, this.tEnd, t));
     }
     z = clamp(z, 0, 1);
+    this.faceHead = faceHead;
+    const reveal = this.revealAt >= 0 ? smooth(this.revealAt, this.revealAt + REVEAL, t) : 1;
 
     // Where it looks: toward the pointer if we know it, otherwise straight out.
     const headScreenY = this.feetY - H * 0.9;
@@ -541,7 +678,7 @@ export class Shadow implements Effect {
     const box = this.box!;
     box.style.transform = `translate3d(${left.toFixed(1)}px,${top.toFixed(1)}px,0) scale(${scale.toFixed(4)})`;
     const base = this.light ? 0.18 : 0.9;
-    box.style.opacity = (base * this.blendK * this.intensity * env * fadeOut * lerp(0.72, 1, z)).toFixed(3);
+    box.style.opacity = (base * this.blendK * this.intensity * env * fadeOut * reveal * lerp(0.72, 1, z)).toFixed(3);
   }
 
   // ---------------------------------------------------------------------------
@@ -609,36 +746,36 @@ export class Shadow implements Effect {
       const s = this.sh[i];
       s.x = nk.x - 0.022 * sinA + side * hw * cosA - (i ? d * 0.01 * (1 - ft) : 0);
       s.y = nk.y + 0.022 * cosA + side * hw * sinA + 0.012 * ft;
-      // Arms swing against the legs: arm i with leg 1 - i.
+      // Arms barely swing: they hang long and loose, against the legs, and the
+      // hands trail behind the forearms.
       const swing = -Math.sin(phi + i * Math.PI);
-      const aU = d * (walk * 0.3 * swing + 0.035) + side * ft * 0.1;
+      const aU = d * (walk * 0.13 * swing + 0.02) + side * ft * 0.1;
       const up = 0.19 * this.armK;
       const e = this.el[i];
       e.x = s.x + up * Math.sin(aU);
       e.y = s.y + up * Math.cos(aU);
-      const aF = aU + d * (0.08 + walk * 0.22 * Math.max(0, swing));
+      const aF = aU + d * (0.05 + walk * 0.08 * Math.max(0, swing));
       const fore = 0.182 * this.armK;
       const w = this.wr[i];
       w.x = e.x + fore * Math.sin(aF);
       w.y = e.y + fore * Math.cos(aF);
-      const aH = aF + d * 0.05;
+      const aH = aF + d * (0.02 - walk * 0.1 * swing);
       const hand = 0.105 * this.armK;
       const tp = this.tip[i];
       tp.x = w.x + hand * Math.sin(aH);
       tp.y = w.y + hand * Math.cos(aH);
     }
 
-    // Head on a long neck, pushed forward in profile, upright when it faces you.
-    const nA = a + d * this.hunch * (1 - fh);
+    // Head on a long neck: pushed forward in profile, upright when it faces you,
+    // and leaning toward the pointer while it looks.
+    const nA = a + d * this.hunch * (1 - fh) + this.lookX * 0.15 * fh;
     const hb = this.headBase;
     hb.x = nk.x + 0.058 * Math.sin(nA);
     hb.y = nk.y - 0.058 * Math.cos(nA);
     const hd = this.head;
-    hd.x = hb.x + d * 0.012 * (1 - fh) + this.lookX * 0.012 * fh;
-    hd.y = hb.y - 0.05 + this.lookY * 0.005 * fh;
-    this.headRot = d * 0.12 * (1 - fh) + this.lookX * 0.07 * fh + this.cockSide * this.cockAmt * cock;
-    this.headRx = lerp(0.045, 0.035, fh);
-    this.jaw = 1 - fh;
+    hd.x = hb.x + 0.052 * Math.sin(nA) + this.lookX * 0.012 * fh;
+    hd.y = hb.y - 0.052 * Math.cos(nA) + this.lookY * 0.01 * fh;
+    this.headRot = d * 0.1 * (1 - fh) + this.lookX * 0.15 * fh + this.cockSide * this.cockAmt * cock;
 
     // Torso outline: down the back from the shoulder, round the hips, up the front.
     const chest = lerp(0.05, 0.066, ft);
@@ -658,10 +795,6 @@ export class Shadow implements Effect {
     this.torsoAt(9, 0.02, hw + 0.016, 0, 1);
   }
 
-  private headRot = 0;
-  private headRx = 0.04;
-  private jaw = 1;
-
   private torsoAt(i: number, along: number, half: number, bulge: number, side: number): void {
     const nk = this.neck;
     const pv = this.pelvis;
@@ -676,18 +809,48 @@ export class Shadow implements Effect {
     p.y = nk.y + dy * along + py * (side * half + bulge);
   }
 
+  /**
+   * The head. In profile it is deep: a skull swelling out behind, a brow and a
+   * long jaw jutting forward. Facing you it is a narrow, tall egg. The change
+   * between the two is what reads as "it turned to look at me".
+   */
+  private drawHead(c: CanvasRenderingContext2D): void {
+    const fh = this.faceHead;
+    const pf = 1 - fh;
+    const d = this.dir;
+    const hd = this.head;
+    const rot = this.headRot;
+    const cr = Math.cos(rot);
+    const sr = Math.sin(rot);
+    // Skull.
+    this.blob(c, hd.x, hd.y, cr, sr, -d * 0.014 * pf, -0.004 * pf, lerp(0.053, 0.034, fh), lerp(0.055, 0.06, fh), rot);
+    // Face and jaw: forward and down in profile, under the skull facing you.
+    this.blob(c, hd.x, hd.y, cr, sr, d * 0.028 * pf, lerp(0.022, 0.03, fh), lerp(0.03, 0.025, fh), 0.034, rot);
+    // Brow ridge, only in profile.
+    if (pf > 0.15) this.blob(c, hd.x, hd.y, cr, sr, d * 0.042 * pf, -0.012, 0.016 * pf, 0.013 * pf, rot);
+  }
+
+  private blob(c: CanvasRenderingContext2D, x: number, y: number, cr: number, sr: number, ox: number, oy: number, rx: number, ry: number, rot: number): void {
+    c.beginPath();
+    c.ellipse(x + ox * cr - oy * sr, y + ox * sr + oy * cr, rx, ry, rot, 0, TAU);
+    c.fill();
+  }
+
   /** Draw the pose sharp, then soften it into the visible canvas. */
   private paint(z: number): void {
     const s = this.sctx!;
+    const h = this.hctx!;
     const v = this.vctx!;
     const sharp = this.sharp!;
+    const headSharp = this.headSharp!;
     const W = sharp.width;
     const Hc = sharp.height;
+    const color = this.light ? 'rgb(24,28,44)' : 'rgb(98,114,142)';
 
     s.setTransform(1, 0, 0, 1, 0, 0);
     s.clearRect(0, 0, W, Hc);
     s.setTransform(RES, 0, 0, RES, ORIGIN_X * RES, ORIGIN_Y * RES);
-    s.fillStyle = s.strokeStyle = this.light ? 'rgb(24,28,44)' : 'rgb(98,114,142)';
+    s.fillStyle = s.strokeStyle = color;
     s.lineCap = 'round';
     s.lineJoin = 'round';
 
@@ -718,21 +881,7 @@ export class Shadow implements Effect {
       this.limb(this.el[i], this.wr[i], 0.027, 0.018);
       this.limb(this.wr[i], this.tip[i], 0.022, 0.007);
     }
-
-    // Head, and a jaw that shows in profile.
-    const hd = this.head;
-    s.beginPath();
-    s.ellipse(hd.x, hd.y, this.headRx, 0.058, this.headRot, 0, TAU);
-    s.fill();
-    if (this.jaw > 0.05) {
-      const c = Math.cos(this.headRot);
-      const sn = Math.sin(this.headRot);
-      const jx = this.dir * 0.022 * this.jaw;
-      const jy = 0.03;
-      s.beginPath();
-      s.ellipse(hd.x + jx * c - jy * sn, hd.y + jx * sn + jy * c, 0.022 * this.jaw + 0.012, 0.02, this.headRot, 0, TAU);
-      s.fill();
-    }
+    this.drawHead(s);
 
     if (this.legFade) {
       s.setTransform(1, 0, 0, 1, 0, 0);
@@ -740,6 +889,16 @@ export class Shadow implements Effect {
       s.fillStyle = this.legFade;
       s.fillRect(0, 0, W, Hc);
       s.globalCompositeOperation = 'source-over';
+    }
+
+    // While it looks at you, the head alone gets a second, crisper pass.
+    const look = this.faceHead;
+    if (look > 0.02) {
+      h.setTransform(1, 0, 0, 1, 0, 0);
+      h.clearRect(0, 0, W, Hc);
+      h.setTransform(RES, 0, 0, RES, ORIGIN_X * RES, ORIGIN_Y * RES);
+      h.fillStyle = color;
+      this.drawHead(h);
     }
 
     // Soften. Nearer the glass means a tighter, darker core.
@@ -755,20 +914,35 @@ export class Shadow implements Effect {
       v.globalAlpha = 1;
       if (f) v.filter = blurFilter(lerp(4.6, 2.4, z));
       v.drawImage(sharp, 0, 0);
+      if (look > 0.02) {
+        v.globalAlpha = 0.75 * look;
+        if (f) v.filter = blurFilter(lerp(2.2, 1.2, z));
+        v.drawImage(headSharp, 0, 0);
+      }
     } else {
       // A faint cold haze and rim, hollowed out by the figure standing in front of it.
-      v.globalAlpha = 0.9;
+      v.globalAlpha = 0.55;
       if (f) v.filter = blurFilter(lerp(13, 9, z));
       v.drawImage(sharp, 0, 0);
-      v.globalAlpha = 0.3;
+      v.globalAlpha = 0.6;
       if (f) v.filter = blurFilter(lerp(6, 4, z));
       v.drawImage(sharp, 0, 0);
+      if (look > 0.02) {
+        // A tighter rim round the head while it looks.
+        v.globalAlpha = 0.5 * look;
+        if (f) v.filter = blurFilter(lerp(3.5, 2.5, z));
+        v.drawImage(headSharp, 0, 0);
+      }
       // Cut the figure out twice so even thin limbs are solid dark, not outlines.
       v.globalCompositeOperation = 'destination-out';
       v.globalAlpha = 1;
       if (f) v.filter = blurFilter(lerp(2.2, 1.2, z));
       v.drawImage(sharp, 0, 0);
       v.drawImage(sharp, 0, 0);
+      if (look > 0.02) {
+        if (f) v.filter = blurFilter(1);
+        v.drawImage(headSharp, 0, 0);
+      }
       v.globalCompositeOperation = 'source-over';
     }
     v.globalAlpha = 1;
