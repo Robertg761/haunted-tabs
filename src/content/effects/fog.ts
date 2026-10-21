@@ -45,10 +45,27 @@ const LIFT_STEP = 5 / 78;
 /** Per stage: how far the fog reaches in from the bottom (fraction of the short side) and how thick the middle gets. */
 const REACH = [0, 0.2, 0.27, 0.36, 0.47];
 const CENTRE = [0, 0, 0.035, 0.09, 0.14];
+/**
+ * The top of the pane frosts least (warm air rises), and that is where sticky headers
+ * and navigation live: below a thin rime line, fog in the top band is capped so header
+ * text keeps at least 3:1 contrast, feathering back to full strength further down.
+ */
+const TOP_BAND = 64;
+const TOP_FEATHER = 64;
+const RIME_LINE = 6;
+
+/** The most fog allowed at height y (CSS px) for a page whose band cap is `cap`. */
+function topCap(y: number, cap: number): number {
+  if (y < RIME_LINE) return Math.max(cap, 0.6 - (0.6 - cap) * smoothstep(0, RIME_LINE, y));
+  if (y < TOP_BAND) return cap;
+  return cap + (1 - cap) * smoothstep(TOP_BAND, TOP_BAND + TOP_FEATHER, y);
+}
 
 interface Look {
   palette: Palette;
   edgeCap: number;
+  /** Fog cap over the header band: light pages need far less fog for the same contrast loss. */
+  topCap: number;
   bloom: number;
   rim: string;
   rimAlpha: number;
@@ -449,6 +466,7 @@ export class Fog implements Effect {
           const py = (y + 0.5) * cell;
           const ny = Math.max(0.004, Math.min(py / reachTop, (vh - py) / reachBottom));
           const ay = 1 / (ny * ny);
+          const capY = Math.min(cap, topCap(py, look.topCap));
           for (let x = 0, i = y * cols; x < cols; x++, i++) {
             const px = (x + 0.5) * cell;
             const nx = Math.max(0.004, Math.min(px, vw - px) / reachSide);
@@ -459,7 +477,7 @@ export class Fog implements Effect {
             const lim = (0.62 + 0.8 * low[i]) * (1 + 0.6 * corner);
             const f = clamp01(1 - d / lim);
             const s0 = f * f * (3 - 2 * f);
-            const t = Math.min(cap, (centre + (cap - centre) * s0 * Math.sqrt(Math.sqrt(s0))) * (0.86 + 0.2 * mid[i]));
+            const t = Math.min(capY, (centre + (cap - centre) * s0 * Math.sqrt(Math.sqrt(s0))) * (0.86 + 0.2 * mid[i]));
             T[i] = t;
             mass += t;
             order[i] = clamp01(d / (lim * 1.1)) * 0.86 + mid[i] * 0.14;
@@ -1354,7 +1372,8 @@ export class Fog implements Effect {
         const px = (gx + 0.5) * cell;
         const py = (gy + 0.5) * cell;
         const q = Math.hypot((px - imp.cx) / rx, (py - imp.cy) / ry) * (0.8 + 0.4 * noise.fbm(px / 70, py / 70, 3));
-        bloom[gy * cols + gx] = (1 - smoothstep(0.5, 1.05, q)) * (0.85 + 0.15 * noise.at(px / 25, py / 25));
+        const b = (1 - smoothstep(0.5, 1.05, q)) * (0.85 + 0.15 * noise.at(px / 25, py / 25));
+        bloom[gy * cols + gx] = Math.min(b, topCap(py, this.look!.topCap) / this.look!.bloom);
       }
     }
     this.bloomMap = bloom;
@@ -1429,8 +1448,8 @@ function busyAt(x: number, y: number, imagesOk: boolean): number {
 function pickLook(): Look {
   const dark = pageIsDark();
   return dark
-    ? { palette: { dark, lo: [104, 114, 126], hi: [196, 204, 214] }, edgeCap: 0.7, bloom: 0.66, rim: '214,224,234', rimAlpha: 0.1 }
-    : { palette: { dark, lo: [178, 189, 203], hi: [236, 241, 247] }, edgeCap: 0.9, bloom: 0.92, rim: '58,74,94', rimAlpha: 0.14 };
+    ? { palette: { dark, lo: [104, 114, 126], hi: [196, 204, 214] }, edgeCap: 0.7, topCap: 0.3, bloom: 0.66, rim: '214,224,234', rimAlpha: 0.1 }
+    : { palette: { dark, lo: [178, 189, 203], hi: [236, 241, 247] }, edgeCap: 0.9, topCap: 0.12, bloom: 0.92, rim: '58,74,94', rimAlpha: 0.14 };
 }
 
 /**
