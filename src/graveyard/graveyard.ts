@@ -271,6 +271,13 @@ function updateEmpty(shownCount = visible().length): void {
   if (quiet && emptyEl.hidden) {
     showEmptyScene();
   } else if (!quiet) emptyEl.hidden = true;
+  // An empty yard has nothing to search or raise, so the toolbar steps aside.
+  const controls = document.querySelector<HTMLElement>('.controls')!;
+  if (quiet && !controls.hidden) {
+    searchInput.value = '';
+    lastQuery = '';
+  }
+  controls.hidden = quiet;
   noMatchEl.hidden = !(loaded && graves.length > 0 && shownCount === 0);
 }
 
