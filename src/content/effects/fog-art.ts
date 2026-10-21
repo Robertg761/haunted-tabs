@@ -1,7 +1,7 @@
 // Procedural art for the fog effect: value noise, the pre-rendered fog texture
-// (haze, grain, droplets, frost), a water-bead sprite, and the shapes of the
-// things that press into the glass from the other side. Everything is drawn
-// once, up front; the per-frame work lives in fog.ts.
+// (haze, grain, droplets, frost, rime), a water-bead sprite, and the shapes of
+// the things that press into the glass from the other side. Everything here is
+// drawn once, up front, in small steps; the per-frame work lives in fog.ts.
 
 export type Rand = () => number;
 export type RGB = readonly [number, number, number];
@@ -13,6 +13,10 @@ export const smoothstep = (a: number, b: number, v: number) => {
   const t = clamp01((v - a) / (b - a));
   return t * t * (3 - 2 * t);
 };
+
+// Each octave is rotated, so the lattice of the value noise never lines up into blocks.
+const ROT_C = Math.cos(0.83);
+const ROT_S = Math.sin(0.83);
 
 /** Smooth 2D value noise in [0, 1], seeded. */
 export class Noise {
@@ -43,20 +47,49 @@ export class Noise {
     return lerp(lerp(v[p[a]], v[p[b]], u), lerp(v[p[a + 1]], v[p[b + 1]], u), w);
   }
 
-  /** Fractal sum of `oct` octaves, normalised to roughly [0, 1]. */
+  /** Fractal sum of `oct` rotated octaves, normalised to roughly [0, 1]. */
   fbm(x: number, y: number, oct: number): number {
     let sum = 0;
     let amp = 0.5;
     let norm = 0;
-    let f = 1;
     for (let i = 0; i < oct; i++) {
-      sum += this.at(x * f + i * 17.3, y * f - i * 9.1) * amp;
+      sum += this.at(x + i * 17.3, y - i * 9.1) * amp;
       norm += amp;
       amp *= 0.5;
-      f *= 2.03;
+      const nx = (x * ROT_C - y * ROT_S) * 2.03;
+      y = (x * ROT_S + y * ROT_C) * 2.03;
+      x = nx;
     }
     return sum / norm;
   }
+}
+
+/**
+ * Evaluate `f` on a coarse lattice (every `step` samples) and fill a w*h field by
+ * bilinear interpolation. Smooth noise costs a fraction of evaluating it everywhere.
+ */
+export function coarseField(w: number, h: number, step: number, f: (x: number, y: number) => number): Float32Array {
+  const cw = Math.ceil((w - 1) / step) + 2;
+  const ch = Math.ceil((h - 1) / step) + 2;
+  const c = new Float32Array(cw * ch);
+  for (let y = 0; y < ch; y++) for (let x = 0; x < cw; x++) c[y * cw + x] = f(x * step, y * step);
+  const out = new Float32Array(w * h);
+  for (let y = 0; y < h; y++) {
+    const gy = y / step;
+    const y0 = gy | 0;
+    const fy = gy - y0;
+    const r0 = y0 * cw;
+    const r1 = r0 + cw;
+    for (let x = 0; x < w; x++) {
+      const gx = x / step;
+      const x0 = gx | 0;
+      const fx = gx - x0;
+      const a = c[r0 + x0] + (c[r0 + x0 + 1] - c[r0 + x0]) * fx;
+      const b = c[r1 + x0] + (c[r1 + x0 + 1] - c[r1 + x0]) * fx;
+      out[y * w + x] = a + (b - a) * fy;
+    }
+  }
+  return out;
 }
 
 function makeCanvas(w: number, h: number): HTMLCanvasElement {
@@ -73,22 +106,28 @@ export function dropSprite(): HTMLCanvasElement {
   const g = c.getContext('2d')!;
   const r = s / 2 - 3;
   const m = s / 2;
-  // The bead lenses the page: a faint body with a dark rim, heaviest at the bottom right.
+  // The bead lenses the page: a faint body and a dark refraction rim, heaviest at the bottom right.
   const body = g.createRadialGradient(m - r * 0.22, m - r * 0.28, r * 0.1, m, m, r);
-  body.addColorStop(0, 'rgba(255,255,255,0.16)');
-  body.addColorStop(0.62, 'rgba(235,242,248,0.06)');
-  body.addColorStop(0.86, 'rgba(18,26,36,0.30)');
-  body.addColorStop(1, 'rgba(18,26,36,0)');
+  body.addColorStop(0, 'rgba(255,255,255,0.14)');
+  body.addColorStop(0.58, 'rgba(235,242,248,0.05)');
+  body.addColorStop(0.82, 'rgba(14,22,32,0.42)');
+  body.addColorStop(0.94, 'rgba(14,22,32,0.22)');
+  body.addColorStop(1, 'rgba(14,22,32,0)');
   g.fillStyle = body;
   g.beginPath();
   g.arc(m, m, r, 0, Math.PI * 2);
   g.fill();
-  // Light refracted through the drop gathers on the far side, as a soft crescent.
   g.lineCap = 'round';
-  g.strokeStyle = 'rgba(255,255,255,0.55)';
-  g.lineWidth = r * 0.16;
+  g.strokeStyle = 'rgba(10,18,28,0.32)';
+  g.lineWidth = r * 0.14;
   g.beginPath();
-  g.arc(m, m, r * 0.66, Math.PI * 0.18, Math.PI * 0.78);
+  g.arc(m, m, r * 0.86, -Math.PI * 0.1, Math.PI * 0.62);
+  g.stroke();
+  // Light refracted through the drop gathers on the far side, as a soft crescent.
+  g.strokeStyle = 'rgba(255,255,255,0.55)';
+  g.lineWidth = r * 0.15;
+  g.beginPath();
+  g.arc(m, m, r * 0.62, Math.PI * 0.2, Math.PI * 0.78);
   g.stroke();
   // The specular glint.
   const hx = m - r * 0.36;
@@ -113,7 +152,6 @@ export interface Palette {
 export interface TextureOptions {
   w: number;
   h: number;
-  scale: number;
   stage: number;
   rand: Rand;
   noise: Noise;
@@ -122,68 +160,17 @@ export interface TextureOptions {
 }
 
 /**
- * The look of fully fogged glass over the whole viewport: milky haze with fractal
- * texture, fine grain, condensation droplets (more of them near the frame) and
- * frost feathers along the edges. Fog.ts masks it by how much fog is where.
+ * The look of fully fogged glass over the whole viewport, at CSS pixel size: milky
+ * haze, fine grain, condensation dots and droplets (more of them near the frame),
+ * a band of rime right at the frame and ice crystals growing in from it. Returned as
+ * a list of steps so the caller can spread the work over several tasks.
  */
-export function renderFogTexture(o: TextureOptions): HTMLCanvasElement {
-  const { w, h, scale, rand, noise, palette } = o;
-  const tex = makeCanvas(w * scale, h * scale);
+export function fogTextureJob(o: TextureOptions): { canvas: HTMLCanvasElement; steps: (() => void)[] } {
+  const { w, h, rand, noise, palette } = o;
+  const tex = makeCanvas(w, h);
   const g = tex.getContext('2d')!;
-  g.scale(scale, scale);
-
-  // 1. Haze: two scales of fractal noise, whiter and thicker towards the frame.
-  const q = 4;
-  const lw = Math.ceil(w / q) + 1;
-  const lh = Math.ceil(h / q) + 1;
-  const small = makeCanvas(lw, lh);
-  const sg = small.getContext('2d')!;
-  const img = sg.createImageData(lw, lh);
-  const d = img.data;
-  const [lr, lg, lb] = palette.lo;
-  const [hr, hg, hb] = palette.hi;
-  for (let y = 0; y < lh; y++) {
-    for (let x = 0; x < lw; x++) {
-      const px = x * q;
-      const py = y * q;
-      const big = noise.fbm(px / 260, py / 260, 4);
-      const fine = noise.fbm(px / 46 + 40, py / 46 - 30, 3);
-      const edge = Math.min(px, w - px, py, h - py);
-      const rime = Math.exp(-Math.max(0, edge) / (16 + 40 * big));
-      const shade = clamp01(0.62 * big + 0.38 * fine + (palette.dark ? 0.35 : 0.15) * rime - 0.08);
-      const i = (y * lw + x) * 4;
-      d[i] = lerp(lr, hr, shade);
-      d[i + 1] = lerp(lg, hg, shade);
-      d[i + 2] = lerp(lb, hb, shade);
-      d[i + 3] = 255 * clamp01(0.7 + 0.3 * fine + 0.25 * rime);
-    }
-  }
-  sg.putImageData(img, 0, 0);
-  g.imageSmoothingEnabled = true;
-  g.imageSmoothingQuality = 'high';
-  g.drawImage(small, 0, 0, lw * q, lh * q);
-
-  // 2. Grain: the micro-droplets that make fog look like fog, too small to see one by one.
-  const tile = makeCanvas(160, 160);
-  const tg = tile.getContext('2d')!;
-  const timg = tg.createImageData(160, 160);
-  const td = timg.data;
-  for (let i = 0; i < td.length; i += 4) {
-    const v = rand();
-    const light = v > 0.5;
-    td[i] = td[i + 1] = td[i + 2] = light ? 255 : 40;
-    td[i + 3] = light ? (v - 0.5) * 2 * 70 : (0.5 - v) * 2 * (palette.dark ? 30 : 22);
-  }
-  tg.putImageData(timg, 0, 0);
-  const pattern = g.createPattern(tile, 'repeat');
-  if (pattern) {
-    g.save();
-    g.scale(1 / scale, 1 / scale);
-    g.fillStyle = pattern;
-    g.globalAlpha = 0.55;
-    g.fillRect(0, 0, w * scale, h * scale);
-    g.restore();
-  }
+  const flush = makeCanvas(1, 1).getContext('2d')!;
+  const dark = palette.dark;
 
   // Where droplets and frost gather: towards the frame, most of all in the corners.
   const edgeness = (x: number, y: number) => {
@@ -192,81 +179,267 @@ export function renderFogTexture(o: TextureOptions): HTMLCanvasElement {
     return clamp01(1 - Math.min(ex, ey) * 1.25) ** 1.4;
   };
 
-  // 3. Fine condensation dots.
-  const fine = Math.round((w * h) / 140);
-  g.fillStyle = 'rgba(255,255,255,0.5)';
-  g.beginPath();
-  for (let i = 0; i < fine; i++) {
-    const x = rand() * w;
-    const y = rand() * h;
-    if (rand() > 0.35 + 0.65 * edgeness(x, y)) continue;
-    const s = 0.6 + rand() * rand() * 1.4;
-    g.rect(x, y, s, s);
-  }
-  g.fill();
-  g.fillStyle = palette.dark ? 'rgba(10,14,20,0.22)' : 'rgba(70,82,96,0.16)';
-  g.beginPath();
-  for (let i = 0; i < fine * 0.5; i++) {
-    const x = rand() * w;
-    const y = rand() * h;
-    if (rand() > 0.3 + 0.7 * edgeness(x, y)) continue;
-    g.rect(x, y, 0.9, 0.9);
-  }
-  g.fill();
+  // Soft haze from two scales of noise; on dark pages the big shapes stay faint so it never reads as smoke.
+  const q = 4;
+  const lw = Math.ceil(w / q) + 1;
+  const lh = Math.ceil(h / q) + 1;
+  let big: Float32Array | null = null;
+  let fineN: Float32Array | null = null;
+  const hazeBig = () => {
+    big = coarseField(lw, lh, 6, (x, y) => noise.fbm((x * q) / 260, (y * q) / 260, 4));
+  };
+  const hazeFine = () => {
+    fineN = coarseField(lw, lh, 3, (x, y) => noise.fbm((x * q) / 46 + 40, (y * q) / 46 - 30, 3));
+  };
+  let small: HTMLCanvasElement | null = null;
+  let img: ImageData | null = null;
+  const hazeRows = (from: number, to: number) => () => {
+    const B = big!;
+    const F = fineN!;
+    if (!small) {
+      small = makeCanvas(lw, lh);
+      img = small.getContext('2d')!.createImageData(lw, lh);
+    }
+    const d = img!.data;
+    const [lr, lg, lb] = palette.lo;
+    const [hr, hg, hb] = palette.hi;
+    const bigW = dark ? 0.22 : 0.55;
+    const y1 = Math.min(lh, Math.round(lh * to));
+    for (let y = Math.round(lh * from), i = y * lw; y < y1; y++) {
+      for (let x = 0; x < lw; x++, i++) {
+        const px = x * q;
+        const py = y * q;
+        const edge = Math.max(0, Math.min(px, w - px, py, h - py));
+        const rime = edge > 120 ? 0 : Math.exp(-edge / (16 + 40 * B[i]));
+        const shade = clamp01(bigW * B[i] + (1 - bigW) * F[i] + (dark ? 0.3 : 0.12) * rime - 0.06);
+        const k = i * 4;
+        d[k] = lerp(lr, hr, shade);
+        d[k + 1] = lerp(lg, hg, shade);
+        d[k + 2] = lerp(lb, hb, shade);
+        d[k + 3] = 255 * clamp01((dark ? 0.8 + 0.14 * F[i] : 0.72 + 0.28 * F[i]) + 0.25 * rime);
+      }
+    }
+  };
+  // Upscale in horizontal bands (clipped, so no seams) to keep each step short.
+  const band = (from: number, to: number, paint: () => void) => () => {
+    g.save();
+    g.beginPath();
+    g.rect(0, Math.floor(h * from), w, Math.ceil(h * (to - from)) + 1);
+    g.clip();
+    paint();
+    g.restore();
+  };
+  const hazePaint = () => {
+    if (img) {
+      small!.getContext('2d')!.putImageData(img, 0, 0);
+      img = null;
+    }
+    g.imageSmoothingEnabled = true;
+    g.imageSmoothingQuality = 'medium';
+    g.drawImage(small!, 0, 0, lw * q, lh * q);
+  };
+  const hazeDone = () => {
+    small!.width = small!.height = 0;
+    small = null;
+    big = fineN = null;
+  };
 
-  // 4. Droplets big enough to catch the light.
-  const drops = Math.round((w * h) / 1500);
-  for (let i = 0; i < drops; i++) {
-    const x = rand() * w;
-    const y = rand() * h;
-    const e = edgeness(x, y);
-    if (rand() > 0.12 + 0.88 * e) continue;
-    const r = 0.9 + rand() ** 3 * (2.6 + 2.2 * e);
-    g.globalAlpha = 0.55 + 0.45 * rand();
-    g.drawImage(o.sprite, x - r, y - r, r * 2, r * 2);
-  }
-  g.globalAlpha = 1;
+  // The micro-droplets that make fog look like fog, too small to see one by one.
+  let pattern: CanvasPattern | null = null;
+  const grainPaint = () => {
+    if (!pattern) {
+      const size = 256;
+      const tile = makeCanvas(size, size);
+      const tg = tile.getContext('2d')!;
+      const timg = tg.createImageData(size, size);
+      const td = timg.data;
+      for (let i = 0; i < td.length; i += 4) {
+        const v = rand();
+        const light = v > 0.5;
+        td[i] = td[i + 1] = td[i + 2] = light ? 255 : 30;
+        td[i + 3] = light ? (v - 0.5) * 2 * 62 : (0.5 - v) * 2 * 30;
+      }
+      tg.putImageData(timg, 0, 0);
+      pattern = g.createPattern(tile, 'repeat');
+    }
+    if (!pattern) return;
+    g.fillStyle = pattern;
+    g.globalAlpha = 0.66;
+    g.fillRect(0, 0, w, h);
+    g.globalAlpha = 1;
+  };
 
-  // 5. Frost feathers growing in from the frame.
-  drawFrost(g, w, h, o.stage, rand, palette.dark);
-  return tex;
+  const fine = Math.round((w * h) / 190);
+  const dotsLight = () => {
+    g.fillStyle = 'rgba(255,255,255,0.5)';
+    g.beginPath();
+    for (let i = 0; i < fine; i++) {
+      const x = rand() * w;
+      const y = rand() * h;
+      if (rand() > 0.35 + 0.65 * edgeness(x, y)) continue;
+      const s = 0.6 + rand() * rand() * 1.4;
+      g.rect(x, y, s, s);
+    }
+    g.fill();
+  };
+  const dotsDark = () => {
+    g.fillStyle = dark ? 'rgba(10,14,20,0.22)' : 'rgba(60,72,88,0.2)';
+    g.beginPath();
+    for (let i = 0; i < fine * 0.5; i++) {
+      const x = rand() * w;
+      const y = rand() * h;
+      if (rand() > 0.3 + 0.7 * edgeness(x, y)) continue;
+      g.rect(x, y, 0.9, 0.9);
+    }
+    g.fill();
+  };
+
+  const drops = () => {
+    // Droplets big enough to catch the light.
+    const n = Math.round((w * h) / 1500);
+    for (let i = 0; i < n; i++) {
+      const x = rand() * w;
+      const y = rand() * h;
+      const e = edgeness(x, y);
+      if (rand() > 0.05 + 0.95 * e) continue;
+      const r = 0.9 + rand() ** 3 * (2.6 + 2.2 * e);
+      g.globalAlpha = 0.55 + 0.45 * rand();
+      g.drawImage(o.sprite, x - r, y - r, r * 2, r * 2);
+    }
+    g.globalAlpha = 1;
+  };
+
+  return {
+    canvas: tex,
+    // Canvas drawing is deferred; a one-pixel copy after each step makes it rasterise inside that step.
+    steps: [
+      hazeBig, hazeFine, hazeRows(0, 0.5), hazeRows(0.5, 1),
+      band(0, 0.34, hazePaint), band(0.34, 0.67, hazePaint), band(0.67, 1, hazePaint), hazeDone,
+      band(0, 0.5, grainPaint), band(0.5, 1, grainPaint), dotsLight, dotsDark, drops,
+      ...rimeSteps(g, w, h, noise, rand), ...frostSteps(g, w, h, o.stage, rand, dark),
+    ].map((step) => () => {
+      step();
+      flush.drawImage(tex, 0, 0, 1, 1, 0, 0, 1, 1);
+    }),
+  };
+}
+
+/** Frost right at the frame: thresholded fine noise, a crust that breaks up a few pixels in. */
+function rimeSteps(g: CanvasRenderingContext2D, w: number, h: number, noise: Noise, rand: Rand): (() => void)[] {
+  const band = 11;
+  const P = 128;
+  let tile: Float32Array | null = null;
+  // Fine, seamlessly tiling noise: two octaves of value noise on wrapping lattices.
+  const fine = (): Float32Array => {
+    if (tile) return tile;
+    const lat = (n: number) => Float32Array.from({ length: n * n }, () => rand());
+    const l1 = lat(64);
+    const l2 = lat(32);
+    const sample = (l: Float32Array, n: number, x: number, y: number) => {
+      const xi = Math.floor(x);
+      const yi = Math.floor(y);
+      const fx = x - xi;
+      const fy = y - yi;
+      const u = fx * fx * (3 - 2 * fx);
+      const v = fy * fy * (3 - 2 * fy);
+      const x0 = xi % n;
+      const y0 = yi % n;
+      const x1 = (x0 + 1) % n;
+      const y1 = (y0 + 1) % n;
+      const a = l[y0 * n + x0] + (l[y0 * n + x1] - l[y0 * n + x0]) * u;
+      const b = l[y1 * n + x0] + (l[y1 * n + x1] - l[y1 * n + x0]) * u;
+      return a + (b - a) * v;
+    };
+    tile = new Float32Array(P * P);
+    for (let y = 0; y < P; y++) for (let x = 0; x < P; x++) tile[y * P + x] = sample(l1, 64, x / 2, y / 2) * 0.55 + sample(l2, 32, x / 4, y / 4) * 0.45;
+    return tile;
+  };
+  const strip = (sw: number, sh: number, horizontal: boolean, far: boolean, ox: number, oy: number) => () => {
+    const t = fine();
+    const len = horizontal ? sw : sh;
+    // How far the crust reaches varies slowly along the edge.
+    const reach = coarseField(len, 1, 8, (s) => noise.at((horizontal ? s + ox : ox * 3) / 37 - 20, (horizontal ? oy * 3 : s + oy) / 37 + 9));
+    const c = makeCanvas(sw, sh);
+    const cg = c.getContext('2d')!;
+    const img = cg.createImageData(sw, sh);
+    const d = img.data;
+    for (let y = 0, k = 0; y < sh; y++) {
+      for (let x = 0; x < sw; x++, k += 4) {
+        const across = horizontal ? y : x;
+        const e = (far ? band - 1 - across : across) / band;
+        const gx = ox + x;
+        const gy = oy + y;
+        const v = t[(gy & (P - 1)) * P + (gx & (P - 1))];
+        const th = 0.36 + (0.62 * e) / (0.5 + 0.9 * reach[horizontal ? x : y]);
+        const a = smoothstep(th, th + 0.16, v) * (1 - e * 0.5);
+        if (a <= 0) continue;
+        d[k] = d[k + 1] = d[k + 2] = 250;
+        d[k + 3] = a * 170;
+      }
+    }
+    cg.putImageData(img, 0, 0);
+    g.drawImage(c, ox, oy);
+    c.width = c.height = 0;
+  };
+  return [
+    strip(w, band, true, false, 0, 0),
+    strip(w, band, true, true, 0, h - band),
+    strip(band, h, false, false, 0, 0),
+    strip(band, h, false, true, w - band, 0),
+  ];
 }
 
 /**
- * Ice crystal feathers: gently curving stems from the frame, fringed with short
- * side branches at about 60 degrees that taper towards the tip, like ferns.
- * Longest and densest in the corners.
+ * Ice crystals: short dendrites from the frame with six-fold, 60-degree symmetry,
+ * every arm fringed with small side branches that fade towards their tips. Dense
+ * clusters along the frame, larger stars in the corners.
  */
-function drawFrost(g: CanvasRenderingContext2D, w: number, h: number, stage: number, rand: Rand, dark: boolean): void {
-  const stems = new Path2D();
-  const fronds = new Path2D();
-  const base = 22 + stage * 12;
-  const corner = Math.min(240, Math.min(w, h) * 0.32);
-  const SPLAY = 1.05; // ~60 degrees
+function frostSteps(g: CanvasRenderingContext2D, w: number, h: number, stage: number, rand: Rand, dark: boolean): (() => void)[] {
+  // Paths by [depth][fade]: three widths, three opacities along each branch.
+  const paths: Path2D[][] = [0, 1, 2].map(() => [new Path2D(), new Path2D(), new Path2D()]);
+  const HEX = Math.PI / 3;
+  const base = 14 + stage * 6;
+  const corner = Math.min(220, Math.min(w, h) * 0.3);
 
-  const feather = (x: number, y: number, ang: number, len: number, depth: number) => {
-    const path = depth >= 2 ? stems : fronds;
-    const step = depth >= 2 ? 3 : 2;
+  const arm = (x: number, y: number, ang: number, len: number, depth: number) => {
+    const step = depth === 2 ? 3.2 : 2.3;
     const steps = Math.max(2, Math.round(len / step));
-    const bend = (rand() - 0.5) * (depth >= 2 ? 0.025 : 0.05);
-    path.moveTo(x, y);
     let side = rand() < 0.5 ? 1 : -1;
+    let px = x;
+    let py = y;
+    // One polyline per third of the arm (each third a little fainter), not a subpath per segment.
+    let bin = -1;
+    let p = paths[depth][0];
     for (let i = 1; i <= steps; i++) {
-      ang += bend + (rand() - 0.5) * 0.05;
-      x += Math.cos(ang) * step;
-      y += Math.sin(ang) * step;
-      path.lineTo(x, y);
-      if (depth === 0) continue;
       const t = i / steps;
-      if (t < 0.08 || rand() > (depth >= 2 ? 0.8 : 0.55)) continue;
-      // Fronds shorten towards the tip; occasionally both sides grow at once.
-      const sub = len * (depth >= 2 ? 0.26 : 0.34) * (1 - t) * (0.6 + rand() * 0.6);
-      if (sub < 2.5) continue;
-      feather(x, y, ang + side * SPLAY * (0.85 + rand() * 0.3), sub, depth - 1);
-      if (rand() < 0.4) feather(x, y, ang - side * SPLAY * (0.85 + rand() * 0.3), sub * 0.85, depth - 1);
-      side = -side;
-      path.moveTo(x, y);
+      ang += (rand() - 0.5) * 0.06;
+      const nx = px + Math.cos(ang) * step;
+      const ny = py + Math.sin(ang) * step;
+      const b = Math.min(2, Math.floor(t * 3));
+      if (b !== bin) {
+        bin = b;
+        p = paths[depth][b];
+        p.moveTo(px, py);
+      }
+      p.lineTo(nx, ny);
+      px = nx;
+      py = ny;
+      if (depth > 0 && t > 0.1 && t < 0.94 && rand() < 0.68) {
+        const sub = len * (depth === 2 ? 0.42 : 0.5) * Math.pow(1 - t, 0.8) * (0.7 + rand() * 0.4);
+        if (sub >= 2.2) {
+          arm(px, py, ang + side * HEX, sub, depth - 1);
+          if (rand() < 0.45) arm(px, py, ang - side * HEX, sub * (0.75 + rand() * 0.25), depth - 1);
+          side = -side;
+          p.moveTo(px, py);
+        }
+      }
     }
+  };
+  /** A crystal: one to three arms 60 degrees apart, like part of a snowflake. */
+  const crystal = (x: number, y: number, ang: number, len: number) => {
+    arm(x, y, ang, len, 2);
+    if (rand() < 0.4) arm(x, y, ang + HEX * (rand() < 0.5 ? 1 : -1), len * (0.55 + rand() * 0.3), 2);
+    if (rand() < 0.15) arm(x, y, ang + HEX * 2 * (rand() < 0.5 ? 1 : -1), len * 0.5, 1);
   };
 
   const edges: [number, number, number, number, number][] = [
@@ -276,42 +449,65 @@ function drawFrost(g: CanvasRenderingContext2D, w: number, h: number, stage: num
     [0, 0, 0, 1, 0],
     [w, 0, 0, 1, Math.PI],
   ];
-  for (const [x0, y0, dx, dy, inward] of edges) {
+  const edgeStep = ([x0, y0, dx, dy, inward]: [number, number, number, number, number]) => () => {
     const length = dx ? w : h;
-    let s = rand() * 20;
+    let s = rand() * 8;
     while (s < length) {
       const near = clamp01(1 - Math.min(s, length - s) / corner);
-      s += 14 + rand() * 40 * (1 - near * 0.75);
-      if (rand() > 0.35 + 0.65 * near) continue;
-      const len = base * (0.4 + rand() * 0.8) * (1 + near * near * 1.8);
-      feather(x0 + dx * s, y0 + dy * s, inward + (rand() - 0.5) * 1.3, len, 2);
+      s += 5 + rand() * 13 * (1 - near * 0.6);
+      if (rand() > 0.5 + 0.5 * near) continue;
+      // Crystals grow from the frame and a few pixels in, on the hexagonal lattice of the ice.
+      const inset = rand() * rand() * 10;
+      const x = x0 + dx * s + Math.cos(inward) * inset;
+      const y = y0 + dy * s + Math.sin(inward) * inset;
+      const ang = inward + (Math.round((rand() - 0.5) * 2) * HEX) / 2 + (rand() - 0.5) * 0.3;
+      crystal(x, y, ang, base * (0.5 + rand() * 0.6) * (1 + near * 0.9));
     }
-  }
-  // Big feathers fanning out of each corner.
+  };
+  // Larger stars clustered into each corner.
+  const corners = () => {
   for (const [cx, cy, a] of [
     [0, 0, Math.PI / 4],
     [w, 0, (3 * Math.PI) / 4],
     [0, h, -Math.PI / 4],
     [w, h, (-3 * Math.PI) / 4],
   ] as const) {
-    const n = 3 + Math.floor(rand() * 3);
-    for (let i = 0; i < n; i++) feather(cx, cy, a + (rand() - 0.5) * 1.4, base * (1.8 + rand() * 1.8), 3);
+    const n = 10 + Math.floor(rand() * 8);
+    for (let i = 0; i < n; i++) {
+      const r = corner * 0.45 * rand() * rand();
+      const t = a + (rand() - 0.5) * 1.5;
+      const x = cx + Math.cos(t) * r;
+      const y = cy + Math.sin(t) * r;
+      const ang = Math.floor(rand() * 6) * HEX + a * 0.3;
+      for (let k = 0; k < 3; k++) arm(x, y, ang + k * 2 * HEX, base * (0.9 + rand() * 0.9) * (1 - r / corner), 2);
+    }
   }
+  };
 
-  g.lineCap = 'round';
-  g.lineJoin = 'round';
-  // A faint dark edge under the white, so the frost reads on white pages as well as dark ones.
-  g.strokeStyle = dark ? 'rgba(20,28,38,0.12)' : 'rgba(60,76,96,0.2)';
-  g.lineWidth = 1.9;
-  g.stroke(stems);
-  g.lineWidth = 1.3;
-  g.stroke(fronds);
-  g.strokeStyle = 'rgba(255,255,255,0.7)';
-  g.lineWidth = 0.9;
-  g.stroke(stems);
-  g.strokeStyle = 'rgba(255,255,255,0.5)';
-  g.lineWidth = 0.55;
-  g.stroke(fronds);
+  const widths = [0.6, 0.8, 1.0];
+  const fades = [1, 0.66, 0.36];
+  // A faint dark edge under the white, so the crystals read on white pages (not needed on dark ones).
+  const shadow = (d: number) => () => {
+    g.lineCap = 'round';
+    g.lineJoin = 'round';
+    // Thin and offset like an etched shadow: strokes over 1 px wide are far slower to rasterise.
+    g.strokeStyle = 'rgba(60,76,96,0.26)';
+    g.lineWidth = 1;
+    g.save();
+    g.translate(0.7, 0.9);
+    for (let f = 0; f < 2; f++) g.stroke(paths[d][f]);
+    g.restore();
+  };
+  const ice = (d: number) => () => {
+    g.lineCap = 'round';
+    g.lineJoin = 'round';
+    g.lineWidth = widths[d];
+    for (let f = 0; f < 3; f++) {
+      g.strokeStyle = `rgba(255,255,255,${((dark ? 0.6 : 0.85) * fades[f] * (0.78 + d * 0.11)).toFixed(3)})`;
+      g.stroke(paths[d][f]);
+    }
+  };
+  return [...edges.map(edgeStep), corners, ...(dark ? [] : [shadow(0), shadow(1), shadow(2)]), ice(0), ice(1), ice(2)];
 }
 
 // --- things pressed into the glass from the other side ---------------------
@@ -462,40 +658,56 @@ function stampDisc(imp: Imprint, grid: Grid, x: number, y: number, r: number, at
   }
 }
 
-// Fingers as tapered capsules in hand units (1 = wrist to middle fingertip), palm centre at the origin.
-const FINGERS: [number, number, number, number, number][] = [
-  // base x, base y, tip x, tip y, radius
-  [-0.135, -0.07, -0.19, -0.43, 0.043],
-  [-0.045, -0.09, -0.055, -0.5, 0.046],
-  [0.048, -0.08, 0.08, -0.46, 0.044],
-  [0.13, -0.04, 0.2, -0.33, 0.037],
-  [-0.19, 0.1, -0.36, -0.08, 0.052],
-];
 
-/** A soft elliptical pad, 1 inside and fading to 0 across its rim. */
-function lobe(x: number, y: number, cx: number, cy: number, rx: number, ry: number, edge: number): number {
-  const q = Math.hypot((x - cx) / rx, (y - cy) / ry);
-  const e = edge / Math.min(rx, ry);
-  return 1 - smoothstep(1 - e, 1 + e, q);
+/** Distance from (px, py) to a polyline [x0, y0, x1, y1, ...]: [distance, t along it 0..1, side -1/+1]. */
+function polyDist(px: number, py: number, pts: number[], out: number[]): void {
+  let best = 1e9;
+  let bt = 0;
+  let side = 1;
+  const n = pts.length / 2 - 1;
+  for (let i = 0; i < n; i++) {
+    const ax = pts[i * 2];
+    const ay = pts[i * 2 + 1];
+    const dx = pts[i * 2 + 2] - ax;
+    const dy = pts[i * 2 + 3] - ay;
+    const t = clamp01(((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy));
+    const ex = px - ax - dx * t;
+    const ey = py - ay - dy * t;
+    const d = ex * ex + ey * ey;
+    if (d < best) {
+      best = d;
+      bt = (i + t) / n;
+      side = dx * ey - dy * ex > 0 ? 1 : -1;
+    }
+  }
+  out[0] = Math.sqrt(best);
+  out[1] = bt;
+  out[2] = side;
 }
 
-function segDist(px: number, py: number, ax: number, ay: number, bx: number, by: number): [number, number] {
-  const dx = bx - ax;
-  const dy = by - ay;
-  const t = clamp01(((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy));
-  return [Math.hypot(px - ax - dx * t, py - ay - dy * t), t];
+interface Finger {
+  pts: number[];
+  r0: number;
+  r1: number;
+  len: number;
+  creases: number[]; // t, partial offset
 }
 
-/** A hand pressed flat against the other side of the glass: heel of the palm first, then the fingers. */
-export function buildHand(cx: number, cy: number, size: number, grid: Grid, rand: Rand): Imprint {
+/**
+ * A hand pressed flat against the other side of the glass: the heel of the palm
+ * first, then the fingers roll on from base to tip. Contact is patchy like real
+ * skin: fingertip pads clearest, a noisy hollow in the palm that barely touches,
+ * thin partial creases at the knuckles, and fine beads squeezed out inside.
+ */
+export function buildHand(cx: number, cy: number, size: number, grid: Grid, rand: Rand, noise: Noise): Imprint {
   const mirror = rand() < 0.5 ? -1 : 1;
-  const ang = (rand() - 0.5) * 0.45;
+  const ang = (rand() - 0.5) * 0.4;
   const cos = Math.cos(ang);
   const sin = Math.sin(ang);
   const reach = size * 0.62;
   const imp = newImprint(grid, cx - reach, cy - reach, cx + reach, cy + reach);
   imp.press = 1.3;
-  const edge = (grid.cell * 0.7) / size;
+  const edge = (grid.cell * 0.75) / size;
   const toHand = (x: number, y: number): [number, number] => {
     const dx = (x - cx) / size;
     const dy = (y - cy) / size;
@@ -505,65 +717,118 @@ export function buildHand(cx: number, cy: number, size: number, grid: Grid, rand
     const x = hx * mirror;
     return [cx + (x * cos - hy * sin) * size, cy + (x * sin + hy * cos) * size];
   };
+
+  // Fingers: base, direction (radians from straight up), length, base and tip radius, curl.
+  const spread = 0.85 + rand() * 0.3;
+  const defs: [number, number, number, number, number, number, number][] = [
+    [-0.13, -0.07, -0.19, 0.355, 0.043, 0.033, 0.05],
+    [-0.04, -0.09, -0.04, 0.41, 0.045, 0.035, 0.015],
+    [0.052, -0.085, 0.11, 0.38, 0.043, 0.033, -0.03],
+    [0.138, -0.045, 0.27, 0.285, 0.036, 0.028, -0.06],
+    [-0.185, 0.11, -0.98, 0.27, 0.05, 0.04, 0.09],
+  ];
+  const fingers: Finger[] = defs.map(([bx, by, dir, len, r0, r1, curl], i) => {
+    const a = dir * (i === 4 ? 1 : spread) + (rand() - 0.5) * 0.08;
+    const L = len * (0.94 + rand() * 0.1);
+    const ux = Math.sin(a);
+    const uy = -Math.cos(a);
+    const bend = curl + (rand() - 0.5) * 0.03;
+    const pts: number[] = [];
+    for (let k = 0; k <= 6; k++) {
+      const t = k / 6;
+      const off = bend * L * Math.sin(Math.PI * t * 0.9);
+      pts.push(bx + ux * L * t - uy * off, by + uy * L * t + ux * off);
+    }
+    const creases = i === 4 ? [0.5, rand() - 0.5] : [0.44 + rand() * 0.04, rand() - 0.5, 0.71 + rand() * 0.04, rand() - 0.5];
+    return { pts, r0, r1, len: L, creases };
+  });
+
+  const tmp = [0, 0, 0];
   for (let gy = 0; gy < imp.h; gy++) {
     for (let gx = 0; gx < imp.w; gx++) {
-      const [hx, hy] = toHand((imp.x0 + gx + 0.5) * grid.cell, (imp.y0 + gy + 0.5) * grid.cell);
+      const px = (imp.x0 + gx + 0.5) * grid.cell;
+      const py = (imp.y0 + gy + 0.5) * grid.cell;
+      const [hx, hy] = toHand(px, py);
+      if (hx * hx + hy * hy > 0.42) continue;
       let best = 0;
       let when = 1e9;
-      // Palm: the pad under the knuckles, and the two mounds of the heel, with a
-      // hollow in the middle that never quite touches the glass.
-      const pads =
-        Math.max(
-          lobe(hx, hy, 0, 0.02, 0.215, 0.12, edge),
-          lobe(hx, hy, -0.085, 0.16, 0.11, 0.135, edge),
-          lobe(hx, hy, 0.09, 0.165, 0.1, 0.115, edge),
-        );
-      if (pads > 0) {
-        const hollow = 0.5 * Math.exp(-((hx / 0.09) ** 2 + ((hy - 0.1) / 0.08) ** 2));
-        best = pads * (1 - hollow);
+      // Palm: one broad pad, wider under the knuckles, tapering to a rounded heel.
+      const half = 0.212 - 0.045 * clamp01((hy + 0.09) / 0.39);
+      const rr = 0.115;
+      const qx = Math.abs(hx) - (half - rr);
+      const qy = Math.abs(hy - 0.105) - (0.2 - rr);
+      const sd = Math.hypot(Math.max(qx, 0), Math.max(qy, 0)) + Math.min(Math.max(qx, qy), 0) - rr;
+      const palm = 1 - smoothstep(-edge, edge, sd);
+      if (palm > 0) {
+        // Pressure: heel and the pads under the knuckles press hardest; the hollow barely touches.
+        const heel = Math.exp(-(((hx + 0.07) / 0.1) ** 2 + ((hy - 0.22) / 0.08) ** 2)) + Math.exp(-(((hx - 0.09) / 0.08) ** 2 + ((hy - 0.21) / 0.08) ** 2));
+        const pads = Math.exp(-(((hy + 0.045) / 0.045) ** 2));
+        const hr = 0.075 * (0.75 + 0.5 * noise.fbm(px / 18, py / 18, 2));
+        const hollow = Math.exp(-((hx + 0.01) ** 2 + (hy - 0.07) ** 2) / (hr * hr));
+        const pressure = clamp01(0.52 + 0.45 * Math.min(1, heel) + 0.2 * pads - 0.6 * hollow);
+        best = palm * pressure;
         when = 0.9 * clamp01(Math.hypot(hx, hy - 0.24) / 0.34);
       }
-      for (const [bx, by, tx, ty, rad] of FINGERS) {
-        const [dist, t] = segDist(hx, hy, bx, by, tx, ty);
-        const r = rad * (1 - 0.18 * t);
-        const s = 1 - smoothstep(r - edge, r + edge, dist);
+      for (const f of fingers) {
+        polyDist(hx, hy, f.pts, tmp);
+        const t = tmp[1];
+        const r = f.r0 + (f.r1 - f.r0) * t;
+        const s = 1 - smoothstep(r - edge, r + edge, tmp[0]);
         if (s <= 0) continue;
-        // Creases at the knuckles, and a firmer pad at the tip.
-        const crease = 1 - 0.42 * Math.exp(-(((t - 0.42) / 0.03) ** 2)) - 0.34 * Math.exp(-(((t - 0.7) / 0.026) ** 2));
-        const v = s * crease * (0.85 + 0.15 * t);
+        // Fingertip pads press hardest; creases are thin, partial lines of lighter contact.
+        let p = 0.66 + 0.34 * smoothstep(0.6, 0.86, t);
+        const across = (tmp[0] / r) * tmp[2];
+        for (let c = 0; c < f.creases.length; c += 2) {
+          const dt = ((t - f.creases[c]) * f.len) / 0.016;
+          const part = smoothstep(-0.5, 0.2, across * (f.creases[c + 1] > 0 ? 1 : -1) + f.creases[c + 1]);
+          p -= 0.5 * Math.exp(-dt * dt) * part;
+        }
+        const v = s * p;
         if (v > best) best = v;
         when = Math.min(when, 0.7 + t * 1.1);
       }
       if (best <= 0.02) continue;
+      // Skin: fine, patchy contact.
+      const skin = noise.fbm(px / 6.5 + 31, py / 6.5 - 17, 2);
+      best *= smoothstep(0.12, 0.55, 0.62 * best + 0.55 * skin - 0.08);
+      if (best <= 0.02) continue;
       const i = gy * imp.w + gx;
-      imp.S[i] = best;
+      imp.S[i] = Math.min(1, best);
       imp.D[i] = when + rand() * 0.12;
     }
   }
   imp.maxD = 1.9;
-  // Water beads squeezed out around the outline.
-  for (const [bx, by, tx, ty, rad] of FINGERS) {
-    for (let k = 0; k < 7; k++) {
+  // Water squeezed out along the outline of the fingers.
+  for (const f of fingers) {
+    for (let k = 0; k < 6; k++) {
       const t = 0.15 + rand() * 0.85;
+      const i = Math.min(5, Math.floor(t * 6));
+      const ft = t * 6 - i;
+      const ax = f.pts[i * 2];
+      const ay = f.pts[i * 2 + 1];
+      const bx = f.pts[i * 2 + 2];
+      const by = f.pts[i * 2 + 3];
+      const len = Math.hypot(bx - ax, by - ay) || 1;
       const side = rand() < 0.5 ? 1 : -1;
-      const len = Math.hypot(tx - bx, ty - by);
-      const nx = (-(ty - by) / len) * side;
-      const ny = ((tx - bx) / len) * side;
-      const r = rad * (1 - 0.18 * t) + 0.012;
-      const [x, y] = toPage(bx + (tx - bx) * t + nx * r, by + (ty - by) * t + ny * r);
-      imp.beads.push(x, y, 0.7 + t * 1.1 + imp.press * 0.6, 0.7 + rand() * 1.5);
+      const r = f.r0 + (f.r1 - f.r0) * t + 0.012;
+      const [x, y] = toPage(ax + (bx - ax) * ft - ((by - ay) / len) * r * side, ay + (by - ay) * ft + ((bx - ax) / len) * r * side);
+      imp.beads.push(x, y, 0.7 + t * 1.1 + imp.press * 0.6, 0.6 + rand() * 1.3);
     }
   }
-  for (let k = 0; k < 14; k++) {
-    const a = rand() * Math.PI * 2;
-    const [x, y] = toPage(Math.cos(a) * 0.2, 0.1 + Math.sin(a) * 0.2);
-    imp.beads.push(x, y, 0.9 + imp.press * 0.6, 0.8 + rand() * 1.6);
+  // Fine beads stippled inside the contact, where the skin pressed water aside.
+  for (let k = 0, tries = 0; k < 46 && tries < 400; tries++) {
+    const j = Math.floor(rand() * imp.S.length);
+    if (imp.S[j] < 0.55) continue;
+    const x = (imp.x0 + (j % imp.w) + rand()) * grid.cell;
+    const y = (imp.y0 + Math.floor(j / imp.w) + rand()) * grid.cell;
+    imp.beads.push(x, y, imp.D[j] + imp.press * 0.8, 0.4 + rand() * 0.6);
+    k++;
   }
-  // A drip or two running from the heel of the hand.
-  const drips = 1 + Math.floor(rand() * 2);
+  // A small drip running from the heel of the hand.
+  const drips = 1 + (rand() < 0.4 ? 1 : 0);
   for (let k = 0; k < drips; k++) {
-    const [x, y] = toPage((rand() - 0.5) * 0.24, 0.3);
-    imp.drips.push(x, y, 2.4 + rand() * 1.5, 1.8 + rand() * 0.8);
+    const [x, y] = toPage((rand() - 0.5) * 0.22, 0.3);
+    imp.drips.push(x, y, 2.4 + rand() * 1.5, 1.0 + rand() * 0.4);
   }
   imp.beads = sortTuples(imp.beads, 4);
   imp.drips = sortTuples(imp.drips, 4);
