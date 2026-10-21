@@ -1489,11 +1489,29 @@ function pickLook(): Look {
 }
 
 /**
+ * A root filtered with invert() (Dark Reader's filter mode, "night mode" sites) shows the
+ * opposite of its colours. Our host is lifted out of that filter, so judge what is on screen.
+ */
+function rootInverted(): boolean {
+  try {
+    const m = /invert\(\s*([\d.]+)(%?)\s*\)/.exec(getComputedStyle(document.documentElement).filter);
+    return !!m && Number(m[1]) / (m[2] ? 100 : 1) > 0.5;
+  } catch {
+    return false;
+  }
+}
+
+/** Is the page, as it shows on screen, mostly dark? */
+function pageIsDark(): boolean {
+  return pageIsDarkRaw() !== rootInverted();
+}
+
+/**
  * Sample what is actually on screen at a few points and walk up to the first opaque
  * background. Colours are resolved by painting them into a 1x1 canvas, so oklch(),
  * lab() and friends work. Transparent or image-only backgrounds count as unknown.
  */
-function pageIsDark(): boolean {
+function pageIsDarkRaw(): boolean {
   const probe = document.createElement('canvas');
   probe.width = probe.height = 1;
   const pg = probe.getContext('2d', { willReadFrequently: true });

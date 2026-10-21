@@ -124,8 +124,26 @@ function backgroundAt(x: number, y: number, read: (css: string) => Uint8ClampedA
   return null;
 }
 
-/** Is the page mostly dark? Sampled once at start, before our overlay exists. */
+/**
+ * A root filtered with invert() (Dark Reader's filter mode, "night mode" sites) shows the
+ * opposite of its colours. Our host is lifted out of that filter, so judge what is on screen.
+ */
+function rootInverted(): boolean {
+  try {
+    const m = /invert\(\s*([\d.]+)(%?)\s*\)/.exec(getComputedStyle(document.documentElement).filter);
+    return !!m && Number(m[1]) / (m[2] ? 100 : 1) > 0.5;
+  } catch {
+    return false;
+  }
+}
+
+/** Is the page, as it shows on screen, mostly dark? */
 function pageIsDark(): boolean {
+  return pageIsDarkRaw() !== rootInverted();
+}
+
+/** Is the page mostly dark, by its own background colours? Our layers never take hits, so they are not sampled. */
+function pageIsDarkRaw(): boolean {
   const read = makeColorReader();
   let dark = 0;
   let seen = 0;
@@ -409,6 +427,8 @@ export class Dust implements Effect {
     this.themeTimer = window.setTimeout(() => {
       this.themeTimer = undefined;
       if (!this.overlay || this.stopping || this.dissolving) return;
+      // A root that gains a transform or filter gets our host lifted into the top layer.
+      this.onHosts();
       const dark = pageIsDark();
       if (dark === this.dark) return;
       this.dark = dark;
@@ -697,7 +717,21 @@ export class Dust implements Effect {
     }
   }
 
+  /**
+   * On a page that transforms or filters <html> our host is lifted into the top layer (see
+   * attachHost). That is an isolated blend group: the blend layers would mix with nothing and
+   * paint solid beige over the whole page. There only the plain look is safe.
+   */
+  private lifted(): boolean {
+    try {
+      return !!this.overlay?.host.matches(':popover-open');
+    } catch {
+      return false;
+    }
+  }
+
   private hasCompany(): boolean {
+    if (this.lifted()) return true;
     const own = this.overlay?.host;
     for (const el of Array.from(document.documentElement.children)) {
       if (el !== own && el.tagName === 'DIV' && el.hasAttribute(OUR_ATTR)) return true;
@@ -707,6 +741,11 @@ export class Dust implements Effect {
 
   private onHosts = (): void => {
     const company = this.hasCompany();
+    // Lifted into the top layer: no crossfade, the blend layers must not show for a single frame.
+    if (company && this.lifted() && this.mix > 0) {
+      this.mix = 0;
+      this.paintLayers(smooth(this.intro) * smooth(this.fade) * Math.pow(this.shown, 0.85));
+    }
     if (company === this.company) return;
     this.company = company;
     this.wake();

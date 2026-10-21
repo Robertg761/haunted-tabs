@@ -2474,8 +2474,27 @@ export class Drips implements Effect {
   }
 }
 
-/** 0 on a light page, 1 on a dark one, from the page's own background colour. */
+/**
+ * A root filtered with invert() (Dark Reader's filter mode, "night mode" sites) shows the
+ * opposite of its colours. Our host is lifted out of that filter, so judge what is on screen.
+ */
+function rootInverted(): boolean {
+  try {
+    const m = /invert\(\s*([\d.]+)(%?)\s*\)/.exec(getComputedStyle(document.documentElement).filter);
+    return !!m && Number(m[1]) / (m[2] ? 100 : 1) > 0.5;
+  } catch {
+    return false;
+  }
+}
+
+/** 0 on a light page, 1 on a dark one, as it shows on screen. */
 function pageDarkness(): number {
+  const d = pageDarknessRaw();
+  return rootInverted() ? 1 - d : d;
+}
+
+/** 0 on a light page, 1 on a dark one, from the page's own background colour. */
+function pageDarknessRaw(): number {
   try {
     // Let the browser parse the colour (computed styles may be oklch(), lab(), color()...):
     // paint it into a 1x1 canvas and read it back.
