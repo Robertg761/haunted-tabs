@@ -35,10 +35,14 @@ let lastReportedTitle = '';
 let dirtyByInput = false;
 let cobwebs: Cobwebs | null = null;
 const running = new Map<EffectName, Effect>();
+/** Effects fading out after a stop. Restarting one removes the fading copy at once. */
+const fading = new Map<EffectName, Effect>();
 
 function startEffects(names: EffectName[], stage: number, idleMs: number, seed: number): void {
   const reduced = prefersReducedMotion();
   for (const name of names) {
+    fading.get(name)?.destroy();
+    fading.delete(name);
     let effect = running.get(name);
     if (!effect || !effect.active) {
       effect = EFFECTS[name]();
@@ -57,8 +61,12 @@ function startEffects(names: EffectName[], stage: number, idleMs: number, seed: 
 
 function stopEffects(names: Iterable<EffectName>): void {
   for (const name of [...names]) {
-    running.get(name)?.stop();
+    const effect = running.get(name);
     running.delete(name);
+    if (!effect) continue;
+    fading.get(name)?.destroy();
+    fading.set(name, effect);
+    effect.stop();
   }
 }
 
