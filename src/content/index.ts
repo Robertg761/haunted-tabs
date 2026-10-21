@@ -283,7 +283,7 @@ if (!window.__hauntedTabs) {
           web.add(msg.webs);
           if (msg.growAfterMs > 0) web.arm(msg.growAfterMs);
         });
-        sendResponse({ ok: true, webs: cobwebs.count + msg.webs });
+        sendResponse({ ok: true });
         return;
       }
       case 'haunt:effects': {

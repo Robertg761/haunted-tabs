@@ -1060,7 +1060,11 @@ export class Cobwebs {
       p.falling = true;
       p.fade = Math.max(p.fade, rate);
     }
-    for (const w of this.webs) w.weaving = false;
+    // Falling webs no longer count, so webs laid straight after a sweep are not refused.
+    for (const w of this.webs) {
+      w.weaving = false;
+      w.live = 0;
+    }
     for (const s of this.spiders) s.fading = true;
     this.wake();
   }
