@@ -21,9 +21,27 @@ Turn haunting on and tabs you leave alone start to **decay**. Every stage starts
 | 4x (2h) | 💀 Dead | `💀 Here lies Inbox (3)`, `💀 Don't look behind you`… | Skull with red eyes |
 | 8x (4h) | ⚰️ Entombed | `⚰️ The grave for youtube.com is dug`… | Tombstone |
 
-When you return to a **dead** tab it **possesses your screen** for about a second. The real page gets colour-rotted, inverted, sliced, and shaken, and a message like `I WAITED 3 HOURS` flashes up. Then it snaps back to normal with its real title and icon.
+When you return to a **dead** tab it **possesses your screen** for a second or so. The page drains to a dim, washed-out grey, signal tears and colour bands slide across it, and a message like `I WAITED 3 HOURS` types itself out and holds, with a pale face surfacing above it for one beat. Then the message collapses into a line, the screen lets go, and the tab is back to normal with its real title and icon. Nothing on the page is moved or restyled: it all happens on an overlay. Titles in any script work, including Arabic, Hebrew, Devanagari and emoji.
 
 Neglected pages also gather **cobwebs**. When you come back to a stale tab, its corners and open spaces are strung with webs: 2 for a withering tab, up to 7 for an entombed one, and a spider dangles on its thread. Some threads are glued to the window frame and some to the page itself. Scrolling drags the glued ends along with the content until they stretch and snap. Sweeping the mouse through them cuts threads and flings them. A web that loses enough threads gives way and drifts down out of sight. Even the tab you're on starts weaving a new web if you leave it untouched for the idle threshold. The webs are drawn on a click-through overlay, so the page underneath keeps working. They can be switched off in Settings.
+
+### The page itself decays
+
+Each stage also leaves its mark on the page, on top of what came before. Every effect is drawn on its own click-through layer in a closed shadow root, so links, buttons, text selection and scrolling all keep working. None of them touches the page's own DOM or styles, and they are hidden when you print. Each one can be switched off in Settings, and switching one off fades it out in every open tab.
+
+| From | Effect | What you see |
+| --- | --- | --- |
+| 🥀 Withering | **Dust and decay** | Film grain, a yellowing vignette and paper-brown edges, with dust motes drifting in a shaft of light. Moving the mouse stirs the dust, and it settles again once you stop. |
+| 👻 Ghost | **Fogged glass** | Frost creeps in from the edges of the window like breath on cold glass. Moving the mouse wipes clear streaks with a wet edge. Beads of water collect, and now and then one runs down. Wiped areas slowly mist over again. Sometimes a handprint is left in the frost. |
+| 💀 Dead | **Eyes in the dark** | Darkness pools in an empty part of the page and a pair of eyes opens in it. They follow your cursor, blink and squint. They shut the moment you go for them, then open somewhere else. They only ever use empty space, so they never cover content. An entombed tab gets a second, fainter pair. |
+| ⚰️ Entombed | **Drips** | Dark, viscous drips run down from the top edge and pool at the bottom until you scroll them away. |
+
+Two more belong to the **poltergeist**. They are rare, happen only on the tab you're reading, and never stack:
+
+- **Something behind the text:** once, while you read, a tall gaunt shadow walks past *behind* the page. It slows, turns its head to look at you, and walks on. The text stays crisp in front of it on light and dark pages alike.
+- **Ghost cursor:** a faint second pointer copies yours from a moment ago, then goes off on its own. It glides to a link, turns into a pointing hand, gives it a slow phantom click, and drifts away. Sweep your mouse at it and it flinches and vanishes. It never sends the page a real event.
+
+With "reduce motion" turned on in your OS, every effect becomes a calm, mostly static version of itself.
 
 Optional extras:
 
@@ -39,7 +57,8 @@ Optional extras:
 - **Nothing is deleted.** The extension only paints over a page's title and icon, and it puts the originals back when you look at the tab. Anything it closes goes to the Graveyard first.
 - **Never touches** pinned tabs, tabs playing audio, tabs with unsaved form input, or pages it can't inspect (`chrome://`, the Web Store, and so on). Closing and discarding only happen after a check finds no unsaved input.
 - **No network.** No backend, no analytics, no remote fonts or images. State lives in `chrome.storage`. Favicons in the popup and Graveyard come from the browser's local favicon cache.
-- **Photosensitivity:** the possession effect has at most one bright flash and no strobing. With "reduce motion" turned on in your OS, it becomes a slow fade instead. You can also switch possession off in Settings.
+- **Photosensitivity:** the possession effect has at most one bright flash and no strobing, well under the three-flashes-a-second limit. With "reduce motion" turned on in your OS, it and every page effect become a slow, calm fade instead. Each effect can be switched off on its own in Settings.
+- **Pages keep working.** Effects are click-through overlays that never change the page's DOM, styles or events, and they are hidden when printing. Exorcise and the master switch fade them all away.
 
 ### Permissions
 
@@ -97,11 +116,21 @@ npm test            # unit tests for the decay logic (Vitest)
 npm run e2e         # builds, then drives a real Chromium with the extension loaded
 npm run e2e:firefox # same idea in a real Firefox (downloads one into .cache/, or set FIREFOX_PATH)
 npm run lint:firefox  # Mozilla's add-on linter on dist/firefox
+npm run test:popup  # smoke test of the popup UI
+```
+
+To look at one effect on a realistic page, build and then run the effect harness. It saves screenshots over time, reports the frame rate and console errors, and with `--stop` checks that nothing is left behind:
+
+```sh
+node scripts/effect-harness.mjs --effect fog --stage 2 --theme dark --frames 500,3000,8000 --interact --stop
+# --effect dust|fog|eyes|drips|shadow|ghostCursor|cobwebs|possession|popup|graveyard
+# --reduced for prefers-reduced-motion, --width/--height for the viewport
 ```
 
 The end-to-end tests open real local pages and turn haunting on. It fast-forwards the service worker's clock, then checks:
 - titles and favicons decay, and pages that keep retitling themselves stay haunted
 - returning to a dead tab triggers the possession glitch and restores the page
+- page effects start at their stages, stop when switched off, and are cleared by Exorcise
 - poltergeist flickers happen
 - burial skips the tab with unsaved input
 - the Graveyard resurrects tabs
@@ -118,7 +147,8 @@ Firefox runs the same code. The differences are handled at runtime:
 Layout:
 
 - `src/background/`: service worker. Tracks idle time, decides stages, buries, discards, poltergeists.
-- `src/content/`: injected into pages on demand. Swaps the title and favicon, plays the glitch, checks for unsaved input. `cobwebs.ts` is the cobweb physics: a small Verlet simulation on a canvas overlay.
+- `src/content/`: injected into pages on demand. Swaps the title and favicon, runs the page effects, checks for unsaved input. `cobwebs.ts` is the cobweb physics: a small Verlet simulation on a canvas overlay.
+- `src/content/effects/`: one module per page effect (dust, fog, eyes, drips, shadow, ghost cursor) and the possession glitch, all built on the shared overlay in `overlay.ts`.
 - `src/popup/`: the tab manager.
 - `src/graveyard/`: the Graveyard page.
 - `src/shared/haunt.ts`: pure decay logic (stages, eerie titles, haunt level), unit tested.
