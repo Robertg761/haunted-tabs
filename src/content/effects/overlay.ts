@@ -37,6 +37,7 @@ export function createOverlay(name: EffectName, css = ''): Overlay {
   const style = document.createElement('style');
   style.textContent = `
     :host { all: initial; }
+    @media print { :host { display: none !important; } }
     .layer { position: fixed; inset: 0; pointer-events: none; overflow: hidden; z-index: ${Z[name]}; contain: strict; }
     ${css}
   `;

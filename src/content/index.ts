@@ -35,14 +35,18 @@ let lastReportedTitle = '';
 let dirtyByInput = false;
 let cobwebs: Cobwebs | null = null;
 const running = new Map<EffectName, Effect>();
-/** Effects fading out after a stop. Restarting one removes the fading copy at once. */
+/** Effects fading out after a stop. Restarting one revives it instead of duplicating it. */
 const fading = new Map<EffectName, Effect>();
 
 function startEffects(names: EffectName[], stage: number, idleMs: number, seed: number): void {
   const reduced = prefersReducedMotion();
   for (const name of names) {
-    fading.get(name)?.destroy();
+    // Coming back during a fade-out revives the same effect where it is, rather
+    // than starting a second copy from nothing. Each effect's start() cancels its fade.
+    const reviving = fading.get(name);
     fading.delete(name);
+    if (reviving?.active && !running.has(name)) running.set(name, reviving);
+    else reviving?.destroy();
     let effect = running.get(name);
     if (!effect || !effect.active) {
       effect = EFFECTS[name]();
