@@ -185,10 +185,12 @@ describe('sleep', () => {
     expect(sleptMs(1_000_000, 1_000_000 + 8 * 60 * MIN + period, period)).toBe(8 * 60 * MIN);
   });
 
-  it('only takes the downtime off tabs seen before it began', () => {
+  it('takes the downtime off tabs seen before the browser came back', () => {
     const now = 100 * MIN;
     expect(skipDowntime(10 * MIN, 20 * MIN, 60 * MIN, now)).toBe(70 * MIN);
     expect(skipDowntime(90 * MIN, 20 * MIN, 60 * MIN, now)).toBe(90 * MIN);
+    // Used in the seconds between the last heartbeat and quitting: counts as seen on return.
+    expect(skipDowntime(20 * MIN + 20_000, 20 * MIN, 60 * MIN, now)).toBe(80 * MIN);
     expect(skipDowntime(10 * MIN, 20 * MIN, 500 * MIN, now)).toBe(now);
     // A tab idle for 2 hours before an 8 hour night is still 2 hours idle after it.
     const night = 8 * 60 * MIN;

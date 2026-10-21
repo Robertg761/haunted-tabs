@@ -45,9 +45,16 @@ export function sleptMs(dueAt: number, nextAt: number, periodMs: number): number
   return late > SLEEP_GAP_MS ? late : 0;
 }
 
-/** Nobody could use the browser for `ms` from `from`: a tab last seen before then ages that much less. */
+/**
+ * Nobody could use the browser for `ms` from `from`: a tab last seen before then
+ * ages that much less. `from` is the last heartbeat, so the browser may still have
+ * been used for a few seconds after it; a tab seen in the gap counts as seen when
+ * the browser came back.
+ */
 export function skipDowntime(lastSeen: number, from: number, ms: number, now: number): number {
-  return lastSeen < from ? Math.min(lastSeen + ms, now) : lastSeen;
+  if (lastSeen < from) return Math.min(lastSeen + ms, now);
+  if (lastSeen < from + ms) return Math.min(from + ms, now);
+  return lastSeen;
 }
 
 // Mozilla sites Firefox never lets extensions script.
