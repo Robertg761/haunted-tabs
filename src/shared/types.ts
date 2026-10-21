@@ -76,6 +76,8 @@ export interface TabRecord {
   cobwebsArmed?: boolean;
   /** Page effects may be running in the current page. */
   effectsArmed?: boolean;
+  /** Effects switched off while the page could not answer; retried until it does. */
+  pendingStop?: EffectName[];
   /** A return visit to replay once a tab the browser unloaded has reloaded. */
   pendingReturn?: { stage: Stage; idle: number; at: number; url?: string };
   /** The visit that just played, in case the page reloads straight after. */

@@ -214,6 +214,7 @@ async function restoreTab(tabId: number, rec: TabRecord | undefined, sweep = fal
   if (sweep) {
     rec.cobwebsArmed = false;
     rec.effectsArmed = false;
+    rec.pendingStop = undefined;
   }
 }
 
@@ -336,6 +337,11 @@ async function tick(): Promise<void> {
         const stage = stages.get(tab.id!);
         if (!rec || stage === undefined) return;
         await paint(tab, rec, stage, now);
+        if (rec.pendingStop && !isAsleep(tab)) {
+          const effects = rec.pendingStop.filter((name) => unwantedEffects().includes(name));
+          const res = effects.length ? await send<{ ok: boolean }>(tab.id!, { type: 'haunt:stopEffects', effects }, false) : { ok: true };
+          if (res?.ok) rec.pendingStop = undefined;
+        }
         if (tab.active && settings.cobwebs && !rec.cobwebsArmed && !isProtected(tab) && !isAsleep(tab) && tab.status === 'complete') {
           // Even the tab you are on gathers webs if you stop touching it.
           const res = await send<{ ok: boolean }>(tab.id!, { type: 'haunt:cobwebs', webs: 0, growAfterMs: growAfterMs() }, true);
@@ -368,6 +374,7 @@ async function tick(): Promise<void> {
         rec.appliedTitle = undefined;
         rec.cobwebsArmed = false;
         rec.effectsArmed = false;
+        rec.pendingStop = undefined;
         rec.needsExorcise = false;
       }),
     );
@@ -468,6 +475,11 @@ const STAGE_EFFECTS: [EffectName, Stage][] = [
 const POLTERGEIST_EFFECTS: EffectName[] = ['shadow', 'ghostCursor'];
 const ALL_EFFECTS: EffectName[] = [...STAGE_EFFECTS.map(([name]) => name), ...POLTERGEIST_EFFECTS];
 
+/** Effects the current settings no longer allow. */
+function unwantedEffects(): EffectName[] {
+  return ALL_EFFECTS.filter((name) => !settings.enabled || !settings[name] || (!settings.poltergeist && POLTERGEIST_EFFECTS.includes(name)));
+}
+
 /** How long a return visit waits for a reloading tab before it is dropped. */
 const RETURN_TTL = 2 * 60_000;
 
@@ -546,8 +558,11 @@ async function returnVisit(tab: chrome.tabs.Tab, rec: TabRecord, stage: Stage, i
     delivered &&= !!res?.ok;
   }
   // The page may have been frozen when an effect was switched off. Stop it now.
-  const unwanted = ALL_EFFECTS.filter((name) => !settings.enabled || !settings[name] || (!settings.poltergeist && POLTERGEIST_EFFECTS.includes(name)));
-  if (rec.effectsArmed && unwanted.length) await send(tabId, { type: 'haunt:stopEffects', effects: unwanted }, false);
+  const unwanted = unwantedEffects();
+  if (rec.effectsArmed && unwanted.length) {
+    const res = await send<{ ok: boolean }>(tabId, { type: 'haunt:stopEffects', effects: unwanted }, false);
+    if (res?.ok) rec.pendingStop = undefined;
+  }
   if (delivered) {
     rec.pendingReturn = undefined;
     if (stage !== Stage.Alive) rec.lastReturn = { stage, idle, at: Date.now() };
@@ -594,6 +609,7 @@ async function exorcise(): Promise<void> {
       rec.appliedTitle = undefined;
       rec.cobwebsArmed = false;
       rec.effectsArmed = false;
+      rec.pendingStop = undefined;
       rec.needsExorcise = false;
     }),
   );
@@ -615,7 +631,14 @@ async function setSettings(patch: Partial<Settings>): Promise<void> {
   const switchedOff = ALL_EFFECTS.filter((name) => patch[name] === false || (patch.poltergeist === false && POLTERGEIST_EFFECTS.includes(name)));
   if (switchedOff.length) {
     const tabs = await ext.tabs.query({});
-    await Promise.all(tabs.map((t) => send(t.id!, { type: 'haunt:stopEffects', effects: switchedOff }, false)));
+    await Promise.all(
+      tabs.map(async (t) => {
+        const res = await send<{ ok: boolean }>(t.id!, { type: 'haunt:stopEffects', effects: switchedOff }, false);
+        const rec = state.records[t.id!];
+        // A busy or frozen page missed it: tick asks again once the page answers.
+        if (!res?.ok && rec?.effectsArmed) rec.pendingStop = [...new Set([...(rec.pendingStop ?? []), ...switchedOff])];
+      }),
+    );
   }
   if (patch.cobwebs === false) {
     const tabs = await ext.tabs.query({});
@@ -764,6 +787,7 @@ ext.tabs.onUpdated.addListener((tabId, info, tab) => {
       rec.appliedTitle = undefined;
       rec.cobwebsArmed = false;
       rec.effectsArmed = false;
+      rec.pendingStop = undefined;
       rec.needsExorcise = false;
       // Firefox wakes an unloaded tab as a placeholder first and only then really
       // reloads it, wiping a visit that has only just played. Play it again.
