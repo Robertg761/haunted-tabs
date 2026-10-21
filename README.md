@@ -55,7 +55,7 @@ Optional extras:
 - **Opt-in.** Nothing happens until you flip the switch in the popup. Haunting asks for permission to repaint pages only at that moment.
 - **Exorcise** turns everything off at once and gives every tab back its real title and favicon.
 - **Nothing is deleted.** The extension only paints over a page's title and icon, and it puts the originals back when you look at the tab. Anything it closes goes to the Graveyard first.
-- **Never touches** pinned tabs, tabs playing audio, tabs with unsaved form input, or pages it can't inspect (`chrome://`, the Web Store, and so on). Closing and discarding only happen after a check finds no unsaved input.
+- **Never touches** pinned tabs, tabs playing audio, private (incognito) tabs, tabs with unsaved form input, or pages it can't inspect (`chrome://`, the Web Store, and so on). Closing and discarding only happen after a check finds no unsaved input, and that includes closing a tab from the popup.
 - **No network.** No backend, no analytics, no remote fonts or images. State lives in `chrome.storage`. Favicons in the popup and Graveyard come from the browser's local favicon cache.
 - **Photosensitivity:** the possession effect has at most one bright flash and no strobing, well under the three-flashes-a-second limit. With "reduce motion" turned on in your OS, it and every page effect become a slow, calm fade instead. Each effect can be switched off on its own in Settings.
 - **Pages keep working.** Effects are click-through overlays that never change the page's DOM, styles or events, and they are hidden when printing. Exorcise and the master switch fade them all away.
@@ -76,6 +76,7 @@ Optional extras:
 
 Browsers quietly put idle tabs to sleep. Chrome's Memory Saver and Firefox/Zen tab unloading throw the page away and keep only its title and icon. The page reloads when you click the tab. Browsers can also freeze a background tab's scripts. The haunting is built to survive all of this:
 
+- **Decay pauses when your computer does.** Time the computer spends asleep, or the browser spends closed, doesn't count. Waking your laptop or reopening the browser never entombs every tab at once.
 - **Decay keeps counting while a tab sleeps.** Idle time, stage, the haunt level, and the popup are all tracked by the extension, not the page. A sleeping tab keeps whatever face it had in the tab strip. Nothing can repaint it without waking it up, and the extension will not reload your tabs just to haunt them.
 - **The scare waits for the reload.** When you return to a tab the browser unloaded, the possession and cobwebs are queued until the fresh page has loaded and answered. A dead tab gets its skull back for a moment, glitches, and then comes back to life, exactly as if it had never been unloaded. Firefox briefly wakes tabs as a blank placeholder before the real reload, and that case is handled too.
 - **A frozen tab can't jam the haunting.** Every message to a page gives up after 3 seconds, so one frozen tab never holds up the rest. Tabs known to be asleep or frozen are skipped until they wake.

@@ -778,6 +778,11 @@ async function handle(req: PopupRequest): Promise<unknown> {
     }
     case 'bury': {
       const tab = await ext.tabs.get(req.tabId);
+      // Closing skips the browser's leave-page prompt, so half-written input would be lost.
+      if (!tab.discarded && isHauntableUrl(tab.url)) {
+        const res = await send<{ ok: boolean; dirty: boolean }>(tab.id!, { type: 'haunt:dirty' }, true);
+        if (res?.dirty) return { ok: false, reason: 'That tab has unsaved input, so it stays open. Finish it there first.' };
+      }
       await bury(tab, recordFor(tab, Date.now()), 'you', Date.now());
       await persist();
       return { ok: true };

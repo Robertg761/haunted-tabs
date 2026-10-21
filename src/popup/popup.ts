@@ -1042,7 +1042,11 @@ async function act(row: HTMLElement, action: string | undefined): Promise<void> 
     } else if (action === 'bury') {
       // Feedback right away; the row sinks out once the tab is really closed.
       row.classList.add('sinking');
-      await ask({ type: 'bury', tabId });
+      const res = await ask<{ ok: boolean; reason?: string }>({ type: 'bury', tabId });
+      if (!res.ok) {
+        row.classList.remove('sinking');
+        if (res.reason) say(res.reason, 'warn');
+      }
       await refresh();
     } else if (action === 'discard') {
       const res = await ask<{ ok: boolean; reason?: string }>({ type: 'discard', tabId });

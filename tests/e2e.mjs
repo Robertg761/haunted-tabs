@@ -135,6 +135,9 @@ try {
   const formId = await sw.evaluate(async (url) => (await chrome.tabs.query({ url }))[0].id, `${origin}/form`);
   const refused = await ask({ type: 'discard', tabId: formId });
   check(refused.ok === false, 'tab with unsaved input refuses to be discarded');
+  const kept = await ask({ type: 'bury', tabId: formId });
+  const stillOpen = await sw.evaluate(async (id) => !!(await chrome.tabs.get(id).catch(() => null)), formId);
+  check(kept.ok === false && stillOpen, 'closing a tab with unsaved input from the popup is refused');
 
   // A page that keeps rewriting its own title stays haunted.
   await sleep(1000);

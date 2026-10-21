@@ -1,5 +1,5 @@
-import { loadGraves, onGravesChanged, saveGraves } from '../shared/storage';
-import type { Grave } from '../shared/types';
+import { loadGraves, onGravesChanged } from '../shared/storage';
+import type { Grave, PopupRequest } from '../shared/types';
 import { ext } from '../shared/ext';
 import { Particles } from './particles';
 import { nearRidgeY, startScene } from './scene';
@@ -415,6 +415,11 @@ function unsummon(node: GraveNode): void {
   el.querySelectorAll('[data-action]').forEach((b) => b.removeAttribute('aria-disabled'));
 }
 
+/** The background does every Graveyard write in one queue, so a burial happening meanwhile is never lost. */
+function removeGraves(ids: string[]): Promise<unknown> {
+  return ext.runtime.sendMessage({ type: 'removeGraves', ids } satisfies PopupRequest);
+}
+
 /** Reopen tabs first, and only then remove their graves, so a failure loses nothing. */
 async function resurrect(ids: string[]): Promise<Set<string>> {
   const raised = new Set<string>();
@@ -429,8 +434,7 @@ async function resurrect(ids: string[]): Promise<Set<string>> {
     }
   }
   if (raised.size === 0) return raised;
-  const current = await loadGraves();
-  await saveGraves(current.filter((g) => !raised.has(g.id)));
+  await removeGraves([...raised]);
   return raised;
 }
 
@@ -471,8 +475,7 @@ gravesEl.addEventListener('click', async (e) => {
     if (!g || !confirm(`Lay "${g.title}" to rest? It will be removed from the Graveyard. The page itself stays in your browser history.`)) return;
     stone.dataset.fate = 'rest';
     try {
-      const current = await loadGraves();
-      await saveGraves(current.filter((x) => x.id !== id));
+      await removeGraves([id]);
     } catch (err) {
       delete stone.dataset.fate;
       throw err;
