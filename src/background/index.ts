@@ -131,9 +131,16 @@ function locked<T>(fn: () => Promise<T>): Promise<T> {
   return run;
 }
 
+/**
+ * Records for private-browsing tabs. They live only in memory and are never
+ * persisted, so nothing of a private window outlives it.
+ */
+const privateRecords: Record<number, TabRecord> = {};
+
 function recordFor(tab: chrome.tabs.Tab, now: number): TabRecord {
   const id = tab.id!;
-  let rec = state.records[id];
+  const store = tab.incognito ? privateRecords : state.records;
+  let rec = store[id];
   if (!rec) {
     let lastSeen = tab.active ? now : Math.min(now, tab.lastAccessed ?? now);
     if (state.downtime) lastSeen = skipDowntime(lastSeen, state.downtime.from, state.downtime.ms, now);
@@ -142,7 +149,7 @@ function recordFor(tab: chrome.tabs.Tab, now: number): TabRecord {
       applied: Stage.Alive,
       seed: Math.floor(Math.random() * 2 ** 31),
     };
-    const known = tab.url ? painted[tab.url]?.find((e) => e.painted === tab.title) : undefined;
+    const known = tab.url && !tab.incognito ? painted[tab.url]?.find((e) => e.painted === tab.title) : undefined;
     if (known) {
       // Restored after a restart (or unloaded) and still wearing our paint.
       rec.applied = Stage.Withering;
@@ -151,7 +158,7 @@ function recordFor(tab: chrome.tabs.Tab, now: number): TabRecord {
       rec.realTitle = known.real;
       rec.realFavIconUrl = known.icon;
     }
-    state.records[id] = rec;
+    store[id] = rec;
   }
   if (tab.url && tab.url !== 'about:blank') rec.url = tab.url;
   if (rec.applied === Stage.Alive) {
@@ -408,6 +415,7 @@ async function tick(): Promise<void> {
   const tabs = await ext.tabs.query({});
   const alive = new Set(tabs.map((t) => t.id));
   for (const id of Object.keys(state.records)) if (!alive.has(Number(id))) delete state.records[Number(id)];
+  for (const id of Object.keys(privateRecords)) if (!alive.has(Number(id))) delete privateRecords[Number(id)];
   const windows = new Set(tabs.map((t) => t.windowId));
   for (const id of Object.keys(state.activeByWindow)) if (!windows.has(Number(id))) delete state.activeByWindow[Number(id)];
   if (settings.enabled) await ext.storage.local.set({ [ALIVE_KEY]: now });
@@ -594,8 +602,12 @@ async function wake(tabId: number, windowId: number): Promise<void> {
   await skipSleepBeforeAlarm(tab?.lastAccessed);
   const now = Date.now();
   const previous = state.activeByWindow[windowId];
-  if (previous !== undefined && state.records[previous]) state.records[previous].lastSeen = now;
+  if (previous !== undefined) {
+    const left = state.records[previous] ?? privateRecords[previous];
+    if (left) left.lastSeen = now;
+  }
   state.activeByWindow[windowId] = tabId;
+  if (privateRecords[tabId]) privateRecords[tabId].lastSeen = now;
 
   const rec = state.records[tabId];
   if (rec) {
@@ -833,6 +845,11 @@ async function handle(req: PopupRequest): Promise<unknown> {
           return { ok: false, unchecked: true, reason: "Couldn't check that tab for unsaved input. Bury it again to close it anyway." };
         }
       }
+      if (tab.incognito) {
+        // A private tab just closes: no grave, so nothing of it is kept.
+        await ext.tabs.remove(tab.id!);
+        return { ok: true };
+      }
       await bury(tab, recordFor(tab, Date.now()), 'you', Date.now());
       await persist();
       return { ok: true };
@@ -941,6 +958,7 @@ ext.tabs.onActivated.addListener(({ tabId, windowId }) => {
 ext.tabs.onRemoved.addListener((tabId) => {
   locked(async () => {
     delete state.records[tabId];
+    delete privateRecords[tabId];
     await persist();
   });
 });
