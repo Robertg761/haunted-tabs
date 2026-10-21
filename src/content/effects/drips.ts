@@ -38,6 +38,12 @@ const SHI = comp(1.0);
 /** Band ramp length in field cells (meniscus and pool edge softness). */
 const RAMP = 4.5;
 const TILE = 8;
+/**
+ * CPU path: a tile is shaded again only once its heights or gloss have moved this far
+ * from what it was last shaded with (far below a pixel of edge movement).
+ */
+const EPS_H = 0.003;
+const EPS_G = 0.012;
 const MAX_DRIPS = 12;
 const TRAIL_CAP = 420;
 const MAX_DROPS = 16;
@@ -311,6 +317,14 @@ export class Drips implements Effect {
   /** CPU path: tiles that hold non-transparent pixels, and tiles to upload this frame. */
   private painted = new Uint8Array(0);
   private upload = new Uint8Array(0);
+  /** CPU path: heights and gloss each tile was last shaded with, and the tiles to shade (and light) this frame. */
+  private refH = new Float32Array(0);
+  private refG = new Float32Array(0);
+  private need = new Uint8Array(0);
+  private needLit = new Uint8Array(0);
+  private shadeAll = true;
+  private lastOp = -1;
+  private lastDark = -1;
   private paletteDark = -1;
 
   private drips: Drip[] = [];
@@ -629,6 +643,11 @@ export class Drips implements Effect {
     this.live = new Uint8Array(this.tx * this.ty);
     this.painted = new Uint8Array(this.tx * this.ty);
     this.upload = new Uint8Array(this.tx * this.ty);
+    this.need = new Uint8Array(this.tx * this.ty);
+    this.needLit = new Uint8Array(this.tx * this.ty);
+    this.refH = this.gl ? new Float32Array(0) : new Float32Array(cells);
+    this.refG = this.gl ? new Float32Array(0) : new Float32Array(cells);
+    this.shadeAll = true;
     this.rects = new Int32Array(this.tx * this.ty * 4);
     this.band = new Float32Array(Math.ceil(W / BAND_STEP) + 3);
 
@@ -1928,9 +1947,77 @@ export class Drips implements Effect {
    * cells around it.
    */
   private presentCpu(): void {
+    this.findChanged();
     this.lightCells();
     this.shadePixels();
     this.putTiles();
+  }
+
+  /**
+   * Most of the liquid is still at any moment (the meniscus, the pool, trails slowly drying),
+   * so only tiles whose field moved since they were last shaded are shaded again, with their
+   * neighbours (the normals and the drop shadow reach a few cells across a tile edge). The
+   * rest keep their pixels.
+   */
+  private findChanged(): void {
+    const tx = this.tx;
+    const ty = this.ty;
+    const F = this.field;
+    const G = this.gloss;
+    const RH = this.refH;
+    const RG = this.refG;
+    const fw = this.fw;
+    const op = this.outOpacity();
+    const all = this.shadeAll || op !== this.lastOp || this.dark !== this.lastDark;
+    this.shadeAll = false;
+    this.lastOp = op;
+    this.lastDark = this.dark;
+    const chg = this.needLit; // scratch: changed tiles
+    chg.fill(0);
+    for (let y = 0; y < ty; y++) {
+      for (let x = 0; x < tx; x++) {
+        const t = y * tx + x;
+        if (!this.shade[t]) continue;
+        if (all) {
+          chg[t] = 1;
+          continue;
+        }
+        const x0 = x * TILE;
+        const x1 = Math.min(fw, x0 + TILE);
+        const y1 = Math.min(this.fh, y * TILE + TILE);
+        scan: for (let cy = y * TILE; cy < y1; cy++) {
+          for (let i = cy * fw + x0, e = cy * fw + x1; i < e; i++) {
+            const dh = F[i] - RH[i];
+            const dg = G[i] - RG[i];
+            if (dh > EPS_H || dh < -EPS_H || dg > EPS_G || dg < -EPS_G) {
+              chg[t] = 1;
+              break scan;
+            }
+          }
+        }
+      }
+    }
+    // Shade the changed tiles and their neighbours; light one ring further (shading reads lit cells across the edge).
+    const need = this.need;
+    need.fill(0);
+    for (let y = 0; y < ty; y++) {
+      for (let x = 0; x < tx; x++) {
+        if (!chg[y * tx + x]) continue;
+        for (let yy = Math.max(0, y - 1); yy <= Math.min(ty - 1, y + 1); yy++) {
+          for (let xx = Math.max(0, x - 1); xx <= Math.min(tx - 1, x + 1); xx++) need[yy * tx + xx] = 1;
+        }
+      }
+    }
+    const lit = this.needLit;
+    lit.fill(0);
+    for (let y = 0; y < ty; y++) {
+      for (let x = 0; x < tx; x++) {
+        if (!need[y * tx + x]) continue;
+        for (let yy = Math.max(0, y - 1); yy <= Math.min(ty - 1, y + 1); yy++) {
+          for (let xx = Math.max(0, x - 1); xx <= Math.min(tx - 1, x + 1); xx++) lit[yy * tx + xx] = 1;
+        }
+      }
+    }
   }
 
   /** Lit colour of every cell with liquid in a live tile, packed RGBA (premultiplied by body alpha). */
@@ -1959,7 +2046,7 @@ export class Drips implements Effect {
     const Fx = FILL[0], Fy = FILL[1], Fz = FILL[2];
     for (let tyi = 0; tyi < this.ty; tyi++) {
       for (let txi = 0; txi < tx; txi++) {
-        if (!this.live[tyi * tx + txi]) continue;
+        if (!this.live[tyi * tx + txi] || !this.needLit[tyi * tx + txi]) continue;
         const x0 = txi * TILE;
         const x1 = Math.min(fw, x0 + TILE);
         const y1 = Math.min(fh, tyi * TILE + TILE);
@@ -2042,7 +2129,10 @@ export class Drips implements Effect {
     for (let tyi = 0; tyi < this.ty; tyi++) {
       for (let txi = 0; txi < tx; txi++) {
         const ti = tyi * tx + txi;
-        if (!this.shade[ti]) continue;
+        if (!this.shade[ti] || !this.need[ti]) {
+          this.upload[ti] = 0;
+          continue;
+        }
         const X0 = txi * px;
         const X1 = Math.min(W, X0 + px);
         const Y0 = tyi * px;
@@ -2058,6 +2148,21 @@ export class Drips implements Effect {
         if (this.live[ti]) any = this.shadeTile(txi, tyi, X0, X1, Y0, Y1, op, tShadow);
         this.painted[ti] = any;
         this.upload[ti] = was | any;
+        // Remember what this tile was shaded with.
+        const fw = this.fw;
+        const cx0 = txi * TILE;
+        const cx1 = Math.min(fw, cx0 + TILE);
+        const cy1 = Math.min(this.fh, tyi * TILE + TILE);
+        const F = this.field;
+        const G = this.gloss;
+        const RH = this.refH;
+        const RG = this.refG;
+        for (let cy = tyi * TILE; cy < cy1; cy++) {
+          for (let i = cy * fw + cx0, e = cy * fw + cx1; i < e; i++) {
+            RH[i] = F[i];
+            RG[i] = G[i];
+          }
+        }
       }
     }
   }
