@@ -1,11 +1,12 @@
 // Ghost cursor: a faint second mouse pointer that copies yours from a moment
 // ago, then stops copying and goes about its own business. It glides to a link
-// or button on the page, hovers it, gives it a slow phantom "click", and drifts
-// up toward the tab strip before fading away. Sweep your mouse at it and it
-// flinches and is gone.
+// or button on the page, turns into a pointing hand over it like a real cursor,
+// gives it a slow phantom "click", and drifts up toward the tab strip before
+// fading away. With nothing to reach for it reads a line of text instead. Sweep
+// your mouse at it and it flinches and is gone.
 //
-// Everything is drawn in our own click-through overlay: one small vector arrow
-// and a few afterimages moved with compositor-only transforms. The page never
+// Everything is drawn in our own click-through overlay: a small vector cursor
+// and a few afterimages, moved with compositor-only transforms. The page never
 // receives an event from us, and nothing of the page is changed.
 
 import type { Effect, EffectContext } from './types';
@@ -14,67 +15,108 @@ import { createOverlay, seeded, type Overlay } from './overlay';
 /** The standard arrow cursor, hotspot at 0,0 (about 12 by 20 CSS pixels). */
 const ARROW = 'M0 0L0 17.2L4.15 13.25L6.95 19.75L9.7 18.6L6.95 12.35L12.5 12.35Z';
 /**
- * The arrow's SVG box. The arrow's origin sits half a pixel into it and the box
- * moves in whole pixels, so 1px strokes land exactly on device pixels.
+ * The pointing hand, hotspot at the tip of the index finger. Vertical and
+ * horizontal edges sit on whole pixels so they stay crisp.
+ */
+const HAND =
+  'M-2 2A2 2 0 0 1 2 2L2 8.6A1.5 1.5 0 0 1 5 8.6L5 9.4A1.5 1.5 0 0 1 8 9.4L8 10.3A1.5 1.5 0 0 1 11 10.3' +
+  'L11 15C11 17.3 10.1 18.8 9 20L9 22L-1 22L-1 20.2C-2.4 19 -4.6 16.6 -6.5 14.2' +
+  'A1.45 1.45 0 0 1 -4.5 12.1L-2 14.1Z';
+/** Creases between the folded fingers. */
+const HAND_CREASES = 'M2 8.6L2 11.5M5 9.4L5 12M8 10.3L8 12.5';
+/** The text I-beam, hotspot at its centre, drawn as a stroke. */
+const IBEAM = 'M-3.5 -9.5Q-0.6 -9.5 0 -7.5Q0.6 -9.5 3.5 -9.5M0 -7.5L0 7.5M-3.5 9.5Q-0.6 9.5 0 7.5Q0.6 9.5 3.5 9.5';
+/**
+ * The cursor's SVG box. The cursor's origin sits half a pixel into it and the
+ * box moves in whole pixels, so 1px strokes land exactly on device pixels.
  */
 const PAD = 11.5;
 const SHIFT = 12;
 const BOX_W = 40;
-const BOX_H = 44;
+const BOX_H = 46;
 
-const HIST = 256; // recorded pointer samples (x, y, t)
-const RHIST = 32; // rendered positions, for afterimages (x, y, t)
-const TRAILS = 4;
-const TRAIL_LAG = 16; // ms between afterimages...
-const TRAIL_GAP = 9; // ...but never more than this many px apart
-const TRAIL_ALPHA = [0.52, 0.34, 0.2, 0.1];
+const HIST = 256; // recorded pointer samples (x, y, t), at least 8ms apart
+const HIST_GAP = 8;
+const RHIST = 48; // rendered positions, for afterimages (x, y, t)
+const TRAILS = 6;
+const TRAIL_ALPHA = [0.3, 0.24, 0.18, 0.13, 0.08, 0.045];
+const TRAIL_MAX = 42; // px: the longest smear
 
 const FLINCH_RADIUS = 60;
 const FLINCH_SPEED = 0.9; // px/ms: a quick swipe, not a drift
+const WANDER_AFTER = 1500; // ms of pointer stillness before it drifts off on its own
+const LONG_HIDDEN = 3000; // ms hidden after which it quietly ends instead of resuming
+
+const INTERACTIVE =
+  'a[href], button, [role="button"], [role="link"], [role="tab"], [role="menuitem"], input[type="submit"], input[type="button"], summary, select, label[for]';
+const TEXTY = /^(P|LI|TD|DD|BLOCKQUOTE|H[1-6]|SPAN|EM|STRONG|B|I)$/;
+
+const glow = (d: string) => `<g fill="none" stroke-linejoin="round" stroke="rgb(125, 172, 255)">
+    <path d="${d}" stroke-width="10" stroke-opacity="0.07"/>
+    <path d="${d}" stroke-width="6" stroke-opacity="0.12"/>
+    <path d="${d}" stroke-width="3.2" stroke-opacity="0.24"/>
+  </g>`;
+const body = (d: string, edge = 0.55) =>
+  `<path d="${d}" fill="rgb(232, 241, 255)" fill-opacity="0.92" stroke="rgb(28, 40, 66)" stroke-opacity="${edge}" stroke-width="1" stroke-linejoin="round"/>`;
+const svg = (cls: string, inner: string) =>
+  `<svg class="${cls}" width="${BOX_W}" height="${BOX_H}" viewBox="${-PAD} ${-PAD} ${BOX_W} ${BOX_H}" aria-hidden="true">${inner}</svg>`;
+
+const GHOST_HTML =
+  '<div class="aura"></div>' +
+  svg('arrow', glow(ARROW) + body(ARROW)) +
+  svg(
+    'hand',
+    glow(HAND) +
+      body(HAND) +
+      `<path d="${HAND_CREASES}" fill="none" stroke="rgb(28, 40, 66)" stroke-opacity="0.4" stroke-width="1" stroke-linecap="round"/>`,
+  ) +
+  svg(
+    'ibeam',
+    `<g fill="none" stroke-linecap="round" stroke-linejoin="round">
+      <path d="${IBEAM}" stroke="rgb(125, 172, 255)" stroke-width="8" stroke-opacity="0.08"/>
+      <path d="${IBEAM}" stroke="rgb(125, 172, 255)" stroke-width="5" stroke-opacity="0.16"/>
+      <path d="${IBEAM}" stroke="rgb(28, 40, 66)" stroke-width="3" stroke-opacity="0.5"/>
+      <path d="${IBEAM}" stroke="rgb(232, 241, 255)" stroke-width="1" stroke-opacity="0.95"/>
+    </g>`,
+  );
+const TRAIL_HTML = svg('arrow', body(ARROW, 0.32));
 
 const CSS = `
-  .g, .t, .ring { position: absolute; left: 0; top: 0; opacity: 0; will-change: transform, opacity; }
+  .g, .t, .r { position: absolute; left: 0; top: 0; opacity: 0; will-change: transform, opacity; }
   .g, .t { width: ${BOX_W}px; height: ${BOX_H}px; transform-origin: ${PAD}px ${PAD}px; }
-  .t { filter: blur(0.6px); }
-  svg { display: block; overflow: visible; }
+  .t { filter: blur(0.5px); }
+  svg { position: absolute; left: 0; top: 0; display: block; overflow: visible; transition: opacity 90ms ease-out; }
+  .g .hand, .g .ibeam, .g.pointing .arrow, .g.reading .arrow { opacity: 0; }
+  .g.pointing .hand, .g.reading .ibeam { opacity: 1; }
   .aura {
     position: absolute; left: -6px; top: -2px; width: 44px; height: 46px; border-radius: 50%;
     background: radial-gradient(closest-side, rgba(150, 190, 255, 0.22), rgba(150, 190, 255, 0.08) 55%, rgba(150, 190, 255, 0));
   }
-  .ring {
-    width: 44px; height: 44px; margin: -22px 0 0 -22px; border-radius: 50%; box-sizing: border-box;
-    border: 1.5px solid rgba(150, 188, 255, 0.85);
-    box-shadow: 0 0 7px rgba(120, 165, 255, 0.55), inset 0 0 5px rgba(120, 165, 255, 0.4);
+  .r {
+    width: 30px; height: 30px; margin: -15px 0 0 -15px; border-radius: 50%; filter: blur(0.6px);
+    background: radial-gradient(closest-side, rgba(130, 170, 250, 0) 52%, rgba(130, 170, 250, 0.9) 76%, rgba(130, 170, 250, 0) 100%);
   }
 `;
 
-const GHOST_SVG = `<svg width="${BOX_W}" height="${BOX_H}" viewBox="${-PAD} ${-PAD} ${BOX_W} ${BOX_H}" aria-hidden="true">
-  <g fill="none" stroke-linejoin="round" stroke="rgb(125, 172, 255)">
-    <path d="${ARROW}" stroke-width="10" stroke-opacity="0.07"/>
-    <path d="${ARROW}" stroke-width="6" stroke-opacity="0.12"/>
-    <path d="${ARROW}" stroke-width="3.2" stroke-opacity="0.24"/>
-  </g>
-  <path d="${ARROW}" fill="rgb(232, 241, 255)" fill-opacity="0.92" stroke="rgb(28, 40, 66)" stroke-opacity="0.55" stroke-width="1" stroke-linejoin="round"/>
-</svg>`;
-
-const TRAIL_SVG = `<svg width="${BOX_W}" height="${BOX_H}" viewBox="${-PAD} ${-PAD} ${BOX_W} ${BOX_H}" aria-hidden="true">
-  <path d="${ARROW}" fill="rgb(176, 204, 255)" fill-opacity="0.75" stroke="rgb(92, 132, 222)" stroke-opacity="0.5" stroke-width="1.4" stroke-linejoin="round"/>
-</svg>`;
-
 type Phase = 'idle' | 'wait' | 'follow' | 'script' | 'flinch' | 'fading';
 
-/** One scripted motion: a curved glide (or a hold, when it goes nowhere). */
+/** One scripted motion: a curved glide, or a hold when it goes nowhere. */
 interface Step {
   dur: number;
-  /** Where it ends: absolute viewport point, or an offset from the target. */
+  /** Where it ends: absolute viewport point, or an offset from the target point. */
   rel: boolean;
   x: number;
   y: number;
   /** Sideways bow of the path, as a fraction of its length. */
   curve: number;
-  ease: 'mj' | 'early' | 'in';
+  ease: 'mj' | 'early' | 'exit';
+  hold?: boolean;
   click?: boolean;
   leave?: boolean;
+  /** Over the target: a real cursor would be a hand here. */
+  point?: boolean;
+  /** On a line of text: a real cursor would be an I-beam here. */
+  read?: boolean;
 }
 
 const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
@@ -84,14 +126,64 @@ const smooth = (v: number) => {
 };
 /** Minimum-jerk profile: how a hand moves a mouse from rest to rest. */
 const minJerk = (t: number) => t * t * t * (10 + t * (6 * t - 15));
+/** Gathers speed over the first 45%, then cruises: drifting away, not darting. */
+const EXIT_A = 0.45;
+const EXIT_V = 1 / (1 - EXIT_A / 2);
+const exitEase = (k: number) => {
+  if (k < EXIT_A) {
+    const s = k / EXIT_A;
+    return EXIT_V * EXIT_A * (s * s * s - (s * s * s * s) / 2);
+  }
+  return EXIT_V * (EXIT_A / 2 + (k - EXIT_A));
+};
+
+/** The clickable thing under a point, looking inside open shadow roots too. */
+function interactiveAt(x: number, y: number): Element | null {
+  let el = document.elementFromPoint(x, y);
+  for (let depth = 0; el?.shadowRoot && depth < 8; depth++) {
+    const inner = el.shadowRoot.elementFromPoint(x, y);
+    if (!inner || inner === el) break;
+    el = inner;
+  }
+  let node: Element | null = el;
+  while (node) {
+    const hit = node.closest(INTERACTIVE);
+    if (hit) return hit;
+    const root = node.getRootNode();
+    node = root instanceof ShadowRoot ? root.host : null;
+  }
+  return null;
+}
+
+/** Where the text caret would land for a point: on a real line of words, or null. */
+function caretAt(x: number, y: number): { x: number; y: number; h: number } | null {
+  const doc = document as Document & {
+    caretPositionFromPoint?(x: number, y: number): { offsetNode: Node; getClientRect(): DOMRect | null } | null;
+    caretRangeFromPoint?(x: number, y: number): Range | null;
+  };
+  let node: Node | null = null;
+  let rect: DOMRect | null = null;
+  if (doc.caretPositionFromPoint) {
+    const p = doc.caretPositionFromPoint(x, y);
+    node = p?.offsetNode ?? null;
+    rect = p?.getClientRect() ?? null;
+  } else if (doc.caretRangeFromPoint) {
+    const range = doc.caretRangeFromPoint(x, y);
+    node = range?.startContainer ?? null;
+    rect = range?.getBoundingClientRect() ?? null;
+  }
+  if (!node || node.nodeType !== Node.TEXT_NODE || !/\S/.test(node.textContent ?? '') || !rect || rect.height < 6) return null;
+  return { x: rect.left, y: rect.top + rect.height / 2, h: rect.height };
+}
 
 export class GhostCursor implements Effect {
   readonly name = 'ghostCursor' as const;
 
   private overlay: Overlay | null = null;
   private ghost: HTMLDivElement | null = null;
+  private aura: HTMLDivElement | null = null;
   private trails: HTMLDivElement[] = [];
-  private ring: HTMLDivElement | null = null;
+  private rings: HTMLDivElement[] = [];
 
   private phase: Phase = 'idle';
   private reduced = false;
@@ -107,12 +199,9 @@ export class GhostCursor implements Effect {
   private hiddenTotal = 0;
   private lastFrame = 0;
 
-  // Viewport.
   private vw = 0;
   private vh = 0;
   private dpr = 1;
-  private sx = 0;
-  private sy = 0;
 
   // Your pointer, as recorded.
   private hist = new Float64Array(HIST * 3);
@@ -129,11 +218,12 @@ export class GhostCursor implements Effect {
   private delay = 750;
   private offX = 0;
   private offY = 0;
+  private copying = false;
   private dx = 0; // desired position
   private dy = 0;
   private x = 0; // rendered position (spring-smoothed)
   private y = 0;
-  private vx = 0;
+  private vx = 0; // px/s
   private vy = 0;
   private speed = 0; // smoothed, px/ms
   private rhist = new Float64Array(RHIST * 3);
@@ -146,14 +236,18 @@ export class GhostCursor implements Effect {
   private blendX = 0; // where a behaviour switch started from
   private blendY = 0;
   private blendAt = -1e9;
+  /** Until when the desired point is known to stay put (0: it is moving). */
+  private holdUntil = 0;
 
   // Wandering, when your pointer gives it nothing to copy.
   private wFromX = 0;
   private wFromY = 0;
   private wToX = 0;
   private wToY = 0;
+  private wCurve = 0;
+  private wAngle = NaN;
   private wAt = 0;
-  private wDur = 0;
+  private wDur = 1;
   private wNext = 0;
 
   // The script it follows once it acts on its own.
@@ -163,14 +257,24 @@ export class GhostCursor implements Effect {
   private stepX0 = 0;
   private stepY0 = 0;
   private stepFired = false;
-  private candidates: { el: Element; x: number; y: number; w: number; h: number }[] = [];
-  private tx = 0; // target hover point, page coordinates
+  private target: Element | null = null;
+  private targetHand = false;
+  private tOffX = 0; // hover point, relative to the target's box
+  private tOffY = 0;
+  private rL = 0; // the target's box, viewport coordinates
+  private rT = 0;
+  private rR = 0;
+  private rB = 0;
+  private rectDirty = false;
+  private tx = 0; // hover point, viewport coordinates
   private ty = 0;
   private ringAt = -1e9;
   private pressAt = -1e9;
   private leaveAlpha = 1;
+  private pointing = false;
+  private reading = false;
+  private onText = false;
 
-  // Flinch.
   private flinchAt = 0;
 
   // Last values written to the DOM, so still frames write nothing.
@@ -178,6 +282,9 @@ export class GhostCursor implements Effect {
   private wY = NaN;
   private wS = NaN;
   private wA = NaN;
+  private trailW = new Float64Array(TRAILS * 3).fill(NaN);
+  private ringW = new Float64Array(8).fill(NaN); // per ring: x, y, scale, opacity
+  private auraW = NaN;
   private trailOn = false;
 
   get active(): boolean {
@@ -192,10 +299,14 @@ export class GhostCursor implements Effect {
     this.rnd = seeded((ctx.seed ^ 0x6c3f9a1d) >>> 0);
     const r = this.rnd;
     this.delay = 600 + r() * 300;
-    const angle = 0.35 + r() * 1.1 + (r() < 0.3 ? Math.PI * 0.5 : 0);
-    const dist = 14 + r() * 9;
-    this.offX = Math.cos(angle) * dist;
-    this.offY = Math.sin(angle) * dist;
+    // Beside your pointer, never tucked under its body or tail (where it would
+    // read as a drop shadow): to its left, its right, or above it. The sectors
+    // leave room for the offset's slow sway (about 17 degrees either way).
+    const sector = r();
+    const deg = sector < 0.45 ? 150 + r() * 75 : sector < 0.75 ? -45 + r() * 60 : 235 + r() * 65;
+    const dist = 26 + r() * 14;
+    this.offX = Math.cos((deg * Math.PI) / 180) * dist;
+    this.offY = Math.sin((deg * Math.PI) / 180) * dist;
 
     this.overlay = createOverlay(this.name, CSS);
     const layer = this.overlay.layer;
@@ -203,20 +314,24 @@ export class GhostCursor implements Effect {
       for (let i = 0; i < TRAILS; i++) {
         const t = document.createElement('div');
         t.className = 't';
-        t.innerHTML = TRAIL_SVG;
+        t.innerHTML = TRAIL_HTML;
         layer.appendChild(t);
         this.trails.push(t);
       }
     }
-    this.ring = document.createElement('div');
-    this.ring.className = 'ring';
+    for (let i = 0; i < 2; i++) {
+      const ring = document.createElement('div');
+      ring.className = 'r';
+      layer.appendChild(ring);
+      this.rings.push(ring);
+    }
     this.ghost = document.createElement('div');
     this.ghost.className = 'g';
-    this.ghost.innerHTML = `<div class="aura"></div>${GHOST_SVG}`;
-    layer.append(this.ring, this.ghost);
+    this.ghost.innerHTML = GHOST_HTML;
+    this.aura = this.ghost.querySelector('.aura');
+    layer.appendChild(this.ghost);
 
     this.measure();
-    this.findCandidates();
     this.listen(true);
     this.hiddenTotal = 0;
     this.hiddenSince = document.hidden ? performance.now() : 0;
@@ -247,15 +362,19 @@ export class GhostCursor implements Effect {
     this.overlay?.remove();
     this.overlay = null;
     this.ghost = null;
-    this.ring = null;
+    this.aura = null;
     this.trails = [];
-    this.candidates = [];
+    this.rings = [];
     this.steps = [];
+    this.target = null;
     this.phase = 'idle';
     this.histCount = this.rhCount = 0;
     this.pointerSeen = false;
+    this.pointing = this.reading = this.onText = false;
     this.alpha = 0;
-    this.wX = this.wY = this.wS = this.wA = NaN;
+    this.wX = this.wY = this.wS = this.wA = this.auraW = NaN;
+    this.trailW.fill(NaN);
+    this.ringW.fill(NaN);
     this.trailOn = false;
   }
 
@@ -269,8 +388,6 @@ export class GhostCursor implements Effect {
     this.vw = innerWidth;
     this.vh = innerHeight;
     this.dpr = Math.min(2, devicePixelRatio || 1);
-    this.sx = scrollX;
-    this.sy = scrollY;
   };
 
   private listen(on: boolean): void {
@@ -279,20 +396,24 @@ export class GhostCursor implements Effect {
     const opts: AddEventListenerOptions = { passive: true, capture: true };
     if (on) {
       window.addEventListener('pointermove', this.onPointer, opts);
-      window.addEventListener('scroll', this.onScroll, opts);
       window.addEventListener('resize', this.measure, opts);
+      // Capture sees scrolling inside any element too, not just the window.
+      document.addEventListener('scroll', this.onScroll, opts);
       document.addEventListener('visibilitychange', this.onVisibility, opts);
     } else {
       window.removeEventListener('pointermove', this.onPointer, opts);
-      window.removeEventListener('scroll', this.onScroll, opts);
       window.removeEventListener('resize', this.measure, opts);
+      document.removeEventListener('scroll', this.onScroll, opts);
       document.removeEventListener('visibilitychange', this.onVisibility, opts);
     }
   }
 
   private onScroll = (): void => {
-    this.sx = scrollX;
-    this.sy = scrollY;
+    // The target may have moved: look again once, on the next frame.
+    if (this.phase === 'script' && this.target) {
+      this.rectDirty = true;
+      this.wake();
+    }
   };
 
   private onVisibility = (): void => {
@@ -301,11 +422,20 @@ export class GhostCursor implements Effect {
       cancelAnimationFrame(this.raf);
       this.raf = 0;
       clearTimeout(this.idleTimer);
+      return;
+    }
+    const away = this.hiddenSince ? performance.now() - this.hiddenSince : 0;
+    this.hiddenTotal += away;
+    this.hiddenSince = 0;
+    // Gone for a while, or asked to leave: it does not pick up where it left off.
+    if (away > LONG_HIDDEN || this.phase === 'fading') {
+      this.destroy();
+      return;
+    }
+    if (this.phase === 'wait') {
+      if (this.spawnTimer === undefined) this.spawn();
     } else {
-      if (this.hiddenSince) this.hiddenTotal += performance.now() - this.hiddenSince;
-      this.hiddenSince = 0;
-      if (this.phase === 'fading') this.destroy();
-      else if (this.phase !== 'wait') this.wake();
+      this.wake();
     }
   };
 
@@ -314,61 +444,60 @@ export class GhostCursor implements Effect {
     const t = this.now();
     const x = e.clientX;
     const y = e.clientY;
-    let speed = 0;
     if (this.pointerSeen) {
-      const dt = Math.max(1, t - this.pt);
       const mx = x - this.px;
       const my = y - this.py;
-      speed = Math.hypot(mx, my) / dt;
-      this.maybeFlinch(x, y, mx, my, speed);
+      const speed = Math.hypot(mx, my) / Math.max(1, t - this.pt);
+      this.maybeFlinch(this.px, this.py, x, y, speed);
     }
     this.px = x;
     this.py = y;
     this.pt = t;
-    const first = !this.pointerSeen;
     this.pointerSeen = true;
-    const i = this.histHead * 3;
-    this.hist[i] = x;
-    this.hist[i + 1] = y;
-    this.hist[i + 2] = t;
-    this.histHead = (this.histHead + 1) % HIST;
-    if (this.histCount < HIST) this.histCount++;
 
-    if (this.phase === 'wait') {
-      this.spawn();
-    } else if (this.phase === 'follow') {
-      // It was wandering on its own: now there is something to copy.
-      if (first) this.markBlend();
-      this.wake();
+    // Record the path, at most one sample per 8ms: the newest sample keeps
+    // moving until the gap to the one before it is wide enough.
+    const h = this.hist;
+    const prev2 = (this.histHead - 2 + HIST) % HIST;
+    let slot = this.histHead;
+    if (this.histCount >= 2 && t - h[prev2 * 3 + 2] < HIST_GAP) slot = (this.histHead - 1 + HIST) % HIST;
+    else {
+      this.histHead = (this.histHead + 1) % HIST;
+      if (this.histCount < HIST) this.histCount++;
     }
+    h[slot * 3] = x;
+    h[slot * 3 + 1] = y;
+    h[slot * 3 + 2] = t;
+
+    if (this.phase === 'wait') this.spawn();
+    else if (this.phase === 'follow') this.wake();
   };
 
   // ---- lifecycle of the apparition ------------------------------------------------
 
   private spawn(): void {
-    if (this.phase !== 'wait') return;
     clearTimeout(this.spawnTimer);
     this.spawnTimer = undefined;
+    // Never while hidden: the clock is stopped, so it would stamp a time in the future.
+    if (this.phase !== 'wait' || document.hidden) return;
     const r = this.rnd;
     const t = this.now();
     this.spawnAt = t;
-    this.autonomyAt = t + 4000 + r() * 1300;
+    this.autonomyAt = t + 3600 + r() * 1000;
     if (this.pointerSeen) {
       this.dx = this.px + this.offX;
       this.dy = this.py + this.offY;
+      this.copying = true;
     } else {
       // Nothing to copy: it shows up near the middle and finds its own way.
       this.dx = this.vw * (0.42 + r() * 0.16);
       this.dy = this.vh * (0.38 + r() * 0.18);
+      this.copying = false;
+      this.startWander(t, 500 + r() * 600);
     }
     this.x = this.dx;
     this.y = this.dy;
     this.vx = this.vy = 0;
-    this.wFromX = this.wToX = this.dx;
-    this.wFromY = this.wToY = this.dy;
-    this.wAt = t;
-    this.wDur = 1;
-    this.wNext = t + 500 + r() * 700;
     this.phase = 'follow';
     this.wake();
   }
@@ -387,18 +516,28 @@ export class GhostCursor implements Effect {
     this.wake();
   }
 
-  private maybeFlinch(x: number, y: number, mx: number, my: number, speed: number): void {
+  /** You came at it fast: anywhere along the last stretch of your pointer's path counts. */
+  private maybeFlinch(x0: number, y0: number, x1: number, y1: number, speed: number): void {
     if (this.phase !== 'follow' && this.phase !== 'script') return;
-    if (this.alpha < 0.3 || this.now() - this.spawnAt < 1200 || speed < FLINCH_SPEED) return;
-    const gx = this.x - x;
-    const gy = this.y - y;
-    const d = Math.hypot(gx, gy);
+    if (this.alpha < 0.3 || speed < FLINCH_SPEED || this.now() - this.spawnAt < 1200) return;
+    const sx = x1 - x0;
+    const sy = y1 - y0;
+    const len2 = sx * sx + sy * sy;
+    if (len2 < 1) return;
+    const gx = this.x;
+    const gy = this.y;
+    const u = ((gx - x0) * sx + (gy - y0) * sy) / len2;
+    // u <= 0: the closest point is where the swipe began, so it moved away.
+    if (u <= 0) return;
+    const k = Math.min(1, u);
+    const cx = x0 + sx * k;
+    const cy = y0 + sy * k;
+    const d = Math.hypot(gx - cx, gy - cy);
     if (d > FLINCH_RADIUS) return;
-    // Only when you come at it, not when you sweep away from it.
-    if (d > 8 && (mx * gx + my * gy) / (Math.hypot(mx, my) * d || 1) < 0.2) return;
-    const k = d > 0.5 ? 1 / d : 0;
-    const ux = d > 0.5 ? gx * k : mx / (Math.hypot(mx, my) || 1);
-    const uy = d > 0.5 ? gy * k : my / (Math.hypot(mx, my) || 1);
+    const len = Math.sqrt(len2);
+    // Away from the swipe's line; straight ahead of it when hit dead on.
+    const ux = d > 2 ? (gx - cx) / d : sx / len;
+    const uy = d > 2 ? (gy - cy) / d : sy / len;
     this.phase = 'flinch';
     this.flinchAt = this.now();
     this.fadeFrom = this.alpha;
@@ -411,109 +550,170 @@ export class GhostCursor implements Effect {
 
   // ---- targets ------------------------------------------------------------------
 
-  /** Once, at start: a handful of visible links and buttons to take an interest in. */
-  private findCandidates(): void {
-    const els = document.querySelectorAll('a[href], button, [role="button"], input[type="submit"], input[type="button"], summary');
-    const n = Math.min(els.length, 400);
-    const found: { el: Element; x: number; y: number; w: number; h: number; score: number }[] = [];
-    const cx = this.vw * 0.5;
-    const cy = this.vh * 0.5;
-    for (let i = 0; i < n; i++) {
-      const el = els[i];
-      const r = el.getBoundingClientRect();
-      if (r.width < 12 || r.height < 10 || r.width > 520 || r.height > 160) continue;
-      if (r.left < 8 || r.top < 8 || r.right > this.vw - 8 || r.bottom > this.vh - 8) continue;
-      const d = Math.hypot(r.left + r.width / 2 - cx, r.top + r.height / 2 - cy) / Math.hypot(cx, cy);
-      found.push({ el, x: r.left + this.sx, y: r.top + this.sy, w: r.width, h: r.height, score: 1 - d * 0.6 + this.rnd() * 0.5 });
-    }
-    found.sort((a, b) => b.score - a.score);
-    for (const f of found) {
-      if (this.candidates.length >= 8) break;
-      // Skip anything covered by something else.
-      const hit = document.elementFromPoint(f.x - this.sx + f.w / 2, f.y - this.sy + f.h / 2);
-      if (hit && (hit === f.el || f.el.contains(hit))) this.candidates.push(f);
-    }
-  }
-
-  /** At the moment it decides: the best candidate from where it is now. */
+  /**
+   * At the moment it decides: probe a coarse grid of points for something
+   * clickable that is actually visible there. Costs the same on any page size.
+   * Falls back to a spot of text to read.
+   */
   private chooseTarget(): boolean {
-    let best = -1;
+    const r = this.rnd;
+    const cols = 6;
+    const rows = 5;
+    const seen = new Set<Element>();
+    let best: Element | null = null;
     let bestScore = -Infinity;
-    for (let i = 0; i < this.candidates.length; i++) {
-      const c = this.candidates[i];
-      const vx = c.x - this.sx + c.w / 2;
-      const vy = c.y - this.sy + c.h / 2;
-      if (vx < 20 || vy < 20 || vx > this.vw - 20 || vy > this.vh - 20) continue;
-      const d = Math.hypot(vx - this.dx, vy - this.dy);
-      const fromYou = this.pointerSeen ? Math.hypot(vx - this.px, vy - this.py) : 999;
-      // A deliberate trip: not right where it is, not across the world, not under your cursor.
-      let score = -Math.abs(d - 340) / 340 + this.rnd() * 0.35;
-      if (d < 70) score -= 2;
-      if (fromYou < 90) score -= 1;
-      if (score > bestScore) {
-        bestScore = score;
-        best = i;
+    let bx = 0;
+    let by = 0;
+    let textScore = -Infinity;
+    let textX = NaN;
+    let textY = NaN;
+    for (let row = 0; row < rows; row++) {
+      for (let col = 0; col < cols; col++) {
+        const x = this.vw * (0.07 + (0.86 * (col + 0.2 + r() * 0.6)) / cols);
+        const y = this.vh * (0.1 + (0.82 * (row + 0.2 + r() * 0.6)) / rows);
+        const el = interactiveAt(x, y);
+        const d = Math.hypot(x - this.dx, y - this.dy);
+        const fromYou = this.pointerSeen ? Math.hypot(x - this.px, y - this.py) : 999;
+        // A deliberate trip: not right where it is, not across the world, not under your cursor.
+        let score = -Math.abs(d - 320) / 320 + r() * 0.35;
+        if (d < 70) score -= 2;
+        if (fromYou < 90) score -= 1;
+        if (!el) {
+          if (score > textScore) {
+            const hit = document.elementFromPoint(x, y);
+            const caret = hit && TEXTY.test(hit.tagName) ? caretAt(x, y) : null;
+            // Only right on a line of words, not in the blank end of a paragraph.
+            if (caret && Math.abs(caret.x - x) < 10 && Math.abs(caret.y - y) < caret.h) {
+              textScore = score;
+              textX = caret.x;
+              textY = caret.y;
+            }
+          }
+          continue;
+        }
+        if (seen.has(el)) continue;
+        seen.add(el);
+        if (score > bestScore) {
+          bestScore = score;
+          best = el;
+          bx = x;
+          by = y;
+        }
       }
     }
-    if (best < 0) return false;
-    const c = this.candidates[best];
-    // One fresh read, in case the page moved since we looked.
-    const r = c.el.isConnected ? c.el.getBoundingClientRect() : null;
-    if (!r || r.width < 4 || r.bottom < 0 || r.top > this.vh) return false;
-    const fx = 0.3 + this.rnd() * 0.3;
-    this.tx = r.left + this.sx + Math.min(r.width * fx, 26 + this.rnd() * 30);
-    this.ty = r.top + this.sy + r.height * (0.45 + this.rnd() * 0.15);
-    return true;
+    if (best) {
+      const rect = best.getBoundingClientRect();
+      let hx = bx;
+      let hy = by;
+      if (rect.width <= 520 && rect.height <= 160) {
+        // Where a person would point: on the label, a little left of centre.
+        hx = rect.left + Math.min(rect.width * (0.3 + r() * 0.3), 26 + r() * 30);
+        hy = rect.top + rect.height * (0.45 + r() * 0.15);
+        if (hx < 6 || hy < 6 || hx > this.vw - 6 || hy > this.vh - 6 || interactiveAt(hx, hy) !== best) {
+          hx = bx;
+          hy = by;
+        }
+      }
+      this.target = best;
+      this.tOffX = hx - rect.left;
+      this.tOffY = hy - rect.top;
+      this.setRect(rect);
+      // Only things that really show a hand get one (in most browsers a <button> keeps the arrow).
+      this.targetHand = getComputedStyle(best).cursor === 'pointer';
+      return true;
+    }
+    this.target = null;
+    this.targetHand = false;
+    this.onText = textX === textX;
+    if (this.onText) {
+      this.tx = textX;
+      this.ty = textY;
+    } else {
+      const a = r() * Math.PI * 2;
+      const d = 160 + r() * 140;
+      this.tx = Math.min(this.vw - 120, Math.max(60, this.dx + Math.cos(a) * d));
+      this.ty = Math.min(this.vh - 60, Math.max(80, this.dy + Math.sin(a) * d));
+    }
+    return false;
+  }
+
+  private setRect(rect: DOMRect): void {
+    this.rL = rect.left;
+    this.rT = rect.top;
+    this.rR = rect.right;
+    this.rB = rect.bottom;
+    this.tx = rect.left + this.tOffX;
+    this.ty = rect.top + this.tOffY;
   }
 
   /** It stops copying you and makes its own plan. */
   private beginScript(): void {
     const r = this.rnd;
-    const slow = this.reduced ? 1.5 : 1;
-    const steps: Step[] = [];
+    const slow = this.reduced ? 1.6 : 1;
+    // Stop where its own momentum would carry it: abrupt, but not a jump.
+    const omega = this.reduced ? 6 : 34;
+    this.dx = this.x + this.vx / omega;
+    this.dy = this.y + this.vy / omega;
     const hasTarget = this.chooseTarget();
-    if (!hasTarget) {
-      // Nothing to reach for: somewhere a little way off, as if reading.
-      const a = r() * Math.PI * 2;
-      const d = 160 + r() * 160;
-      this.tx = Math.min(this.vw - 60, Math.max(60, this.dx + Math.cos(a) * d)) + this.sx;
-      this.ty = Math.min(this.vh - 60, Math.max(80, this.dy + Math.sin(a) * d)) + this.sy;
-    }
     const x0 = this.dx;
     const y0 = this.dy;
-    const txv = this.tx - this.sx;
-    const tyv = this.ty - this.sy;
-    const len = Math.hypot(txv - x0, tyv - y0) || 1;
-    const ux = (txv - x0) / len;
-    const uy = (tyv - y0) / len;
+    const len = Math.hypot(this.tx - x0, this.ty - y0) || 1;
+    const ux = (this.tx - x0) / len;
+    const uy = (this.ty - y0) / len;
     const side = r() < 0.5 ? -1 : 1;
+    const steps: Step[] = [];
 
-    // Stops dead. Settles. Seems to look around, then makes a false start.
-    steps.push({ dur: 360 + r() * 200, rel: false, x: x0, y: y0, curve: 0, ease: 'mj' });
-    const lx = x0 + (r() - 0.5) * 12;
-    const ly = y0 + (r() - 0.5) * 10;
-    steps.push({ dur: 380 * slow, rel: false, x: lx, y: ly, curve: 0, ease: 'mj' });
-    steps.push({ dur: 160 + r() * 140, rel: false, x: lx, y: ly, curve: 0, ease: 'mj' });
-    const fx = lx + ux * (10 + r() * 8) - uy * side * 3;
-    const fy = ly + uy * (10 + r() * 8) + ux * side * 3;
-    steps.push({ dur: 240 * slow, rel: false, x: fx, y: fy, curve: 0, ease: 'mj' });
-    steps.push({ dur: 300 + r() * 200, rel: false, x: fx, y: fy, curve: 0, ease: 'mj' });
+    // Stops dead. Seems to look around, then makes a false start.
+    steps.push({ dur: 220 + r() * 100, rel: false, x: x0, y: y0, curve: 0, ease: 'mj', hold: true });
+    const la = Math.atan2(uy, ux) + side * (1.6 + r() * 0.9);
+    const ld = 20 + r() * 20;
+    const lx = Math.min(this.vw - 20, Math.max(20, x0 + Math.cos(la) * ld));
+    const ly = Math.min(this.vh - 30, Math.max(20, y0 + Math.sin(la) * ld));
+    steps.push({ dur: 430 * slow, rel: false, x: lx, y: ly, curve: side * 0.35, ease: 'mj' });
+    steps.push({ dur: 100 + r() * 60, rel: false, x: lx, y: ly, curve: 0, ease: 'mj', hold: true });
+    const l2 = Math.hypot(this.tx - lx, this.ty - ly) || 1;
+    const fd = 10 + r() * 6;
+    const fx = lx + ((this.tx - lx) / l2) * fd;
+    const fy = ly + ((this.ty - ly) / l2) * fd;
+    steps.push({ dur: 200 * slow, rel: false, x: fx, y: fy, curve: 0, ease: 'mj' });
+    steps.push({ dur: 150 + r() * 70, rel: false, x: fx, y: fy, curve: 0, ease: 'mj', hold: true });
 
     // The glide: a gentle bow, a slight overshoot, a small correction.
-    const over = this.reduced ? 0 : 6 + r() * 7;
-    const err = (r() - 0.5) * 6;
-    const glide = Math.min(1500, Math.max(700, 520 + len * 0.95)) * slow;
-    steps.push({ dur: glide, rel: true, x: ux * over - uy * err, y: uy * over + ux * err, curve: side * (0.08 + r() * 0.08), ease: 'early' });
-    if (!this.reduced) steps.push({ dur: 300 + r() * 80, rel: true, x: 0, y: 0, curve: 0, ease: 'mj' });
+    const gl = Math.hypot(this.tx - fx, this.ty - fy) || 1;
+    const gx = (this.tx - fx) / gl;
+    const gy = (this.ty - fy) / gl;
+    const glide = Math.min(1500, Math.max(650, 500 + gl * 0.9)) * slow;
+    const curve = side * (0.08 + r() * 0.08);
+    if (hasTarget) {
+      const over = this.reduced ? 0 : 6 + r() * 7;
+      const err = this.reduced ? 0 : (r() - 0.5) * 6;
+      steps.push({ dur: glide, rel: true, x: gx * over - gy * err, y: gy * over + gx * err, curve, ease: 'early', point: true });
+      if (!this.reduced) steps.push({ dur: 280 + r() * 80, rel: true, x: 0, y: 0, curve: 0, ease: 'mj', point: true });
+      // It hovers. A slow press. It lingers on what it touched.
+      steps.push({ dur: 300 + r() * 120, rel: true, x: 0, y: 0, curve: 0, ease: 'mj', hold: true, point: true });
+      steps.push({ dur: 850 + r() * 200, rel: true, x: 0, y: 0, curve: 0, ease: 'mj', hold: true, click: true, point: true });
+      steps.push({ dur: 320 * slow, rel: true, x: (r() - 0.5) * 6, y: -2 - r() * 3, curve: 0, ease: 'mj', point: true });
+    } else {
+      // Nothing to reach for: it settles on a line of text and reads along it.
+      const read = this.onText;
+      steps.push({ dur: glide, rel: true, x: 0, y: 0, curve, ease: 'early', read });
+      steps.push({ dur: 260 + r() * 120, rel: true, x: 0, y: 0, curve: 0, ease: 'mj', hold: true, read });
+      let along = Math.min(40 + r() * 40, this.vw - 30 - this.tx);
+      if (read) {
+        // Not past the end of the line.
+        const end = caretAt(this.tx + along, this.ty);
+        if (!end || Math.abs(end.y - this.ty) > 4 || Math.abs(end.x - this.tx - along) > 12) along = Math.min(along, 22);
+      }
+      steps.push({ dur: (1300 + along * 6) * slow, rel: true, x: along, y: 0, curve: 0, ease: 'mj', read });
+      steps.push({ dur: 220 + r() * 120, rel: true, x: along, y: 0, curve: 0, ease: 'mj', hold: true, read });
+    }
 
-    // It hovers. A slow press. It lingers on what it touched.
-    steps.push({ dur: 380 + r() * 160, rel: true, x: 0, y: 0, curve: 0, ease: 'mj' });
-    steps.push({ dur: 900 + r() * 300, rel: true, x: 0, y: 0, curve: 0, ease: 'mj', click: true });
-    steps.push({ dur: 320 * slow, rel: true, x: (r() - 0.5) * 6, y: -2 - r() * 3, curve: 0, ease: 'mj' });
-
-    // Up toward the tab strip, and gone.
-    const upX = Math.min(this.vw - 30, Math.max(30, txv + side * (40 + r() * 120)));
-    steps.push({ dur: (1800 + r() * 400) * (this.reduced ? 1.4 : 1), rel: false, x: upX, y: -46, curve: -side * 0.12, ease: 'in', leave: true });
+    // Up toward the tab strip, at a drift whatever the distance, and gone.
+    const ex = Math.min(this.vw - 30, Math.max(30, this.tx + side * (40 + r() * 120)));
+    const ey = -40;
+    const dist = Math.hypot(ex - this.tx, ey - this.ty);
+    const exitDur = Math.min(3000, Math.max(1500, (EXIT_V * dist) / 0.3)) * (this.reduced ? 1.2 : 1);
+    steps.push({ dur: exitDur, rel: false, x: ex, y: ey, curve: -side * 0.12, ease: 'exit', leave: true });
 
     this.steps = steps;
     this.stepIndex = 0;
@@ -541,45 +741,61 @@ export class GhostCursor implements Effect {
     const t = this.now();
     const dt = Math.min(48, Math.max(1, t - this.lastFrame));
     this.lastFrame = t;
-    let alpha = 1;
-    let scale = 1;
-    let omega = this.reduced ? 5 : 34; // spring stiffness: snappy normally, languid when reduced
+    this.holdUntil = 0;
 
     switch (this.phase) {
       case 'follow': {
         if (t >= this.autonomyAt) {
           this.beginScript();
-          return this.frame2(t, dt, omega);
+          return this.scripted(t, dt);
         }
-        if (this.histCount > 0) this.copyPath(t);
+        // Your pointer has been still a while: it drifts off on its own.
+        const parked = !this.pointerSeen || t - this.pt > this.delay + WANDER_AFTER;
+        if (parked && this.copying) {
+          this.copying = false;
+          this.startWander(t, 0);
+        } else if (!parked && !this.copying) {
+          this.copying = true;
+          this.markBlend();
+        }
+        if (this.copying) this.copyPath(t);
         else this.wander(t);
-        break;
+        const alpha = smooth((t - this.spawnAt) / (this.reduced ? 1400 : 900));
+        // Copying gently when reduced: a soft spring, and never fast.
+        return this.render(t, dt, this.reduced ? 6 : 34, alpha, 1, this.reduced);
       }
       case 'script':
-        return this.frame2(t, dt, omega);
+        return this.scripted(t, dt);
       case 'flinch': {
         const k = (t - this.flinchAt) / (this.reduced ? 700 : 300);
         if (k >= 1) return this.destroy();
-        alpha = this.fadeFrom * (1 - smooth(k));
-        omega = 30;
-        break;
+        return this.render(t, dt, 30, this.fadeFrom * (1 - smooth(k)), 1, false);
       }
       case 'fading': {
         const k = (t - this.fadeAt) / this.fadeDur;
         if (k >= 1) return this.destroy();
-        alpha = this.fadeFrom * (1 - smooth(k));
         this.dy -= dt * 0.01;
-        break;
+        return this.render(t, dt, this.reduced ? 14 : 34, this.fadeFrom * (1 - smooth(k)), 1, false);
       }
-      default:
-        return;
     }
-    if (this.phase === 'follow') alpha = smooth((t - this.spawnAt) / (this.reduced ? 1400 : 900));
-    this.render(t, dt, omega, alpha, scale);
   };
 
-  /** Scripted frames, split out so the switch above stays readable. */
-  private frame2(t: number, dt: number, omega: number): void {
+  private scripted(t: number, dt: number): void {
+    if (this.rectDirty) {
+      // Scrolled (the window or any box): one fresh read of where the target is now.
+      this.rectDirty = false;
+      if (this.target?.isConnected) this.setRect(this.target.getBoundingClientRect());
+      const last = this.steps.length - 1;
+      if (this.stepIndex < last && (!this.target?.isConnected || this.tx < 4 || this.ty < 4 || this.tx > this.vw - 4 || this.ty > this.vh - 4)) {
+        // Scrolled out of reach: it loses interest and drifts off from where it is.
+        this.target = null;
+        this.stepIndex = last;
+        this.stepAt = t;
+        this.stepX0 = this.dx;
+        this.stepY0 = this.dy;
+        this.stepFired = false;
+      }
+    }
     let step = this.steps[this.stepIndex];
     while (step && t - this.stepAt >= step.dur) {
       // Finish the step exactly where it meant to end.
@@ -596,14 +812,11 @@ export class GhostCursor implements Effect {
     if (!step) return this.destroy();
     const k = clamp01((t - this.stepAt) / step.dur);
     this.stepEnd(step);
-    let u: number;
-    if (step.ease === 'early') u = minJerk(Math.pow(k, 0.82));
-    else if (step.ease === 'in') u = k * k * (1.6 - 0.6 * k);
-    else u = minJerk(k);
     const ax = this.stepX0;
     const ay = this.stepY0;
     const bx = this.endX;
     const by = this.endY;
+    const u = step.ease === 'early' ? minJerk(Math.pow(k, 0.82)) : step.ease === 'exit' ? exitEase(k) : minJerk(k);
     if (step.curve) {
       // Quadratic bow, control point pushed sideways from the midpoint.
       const mx = (ax + bx) * 0.5 - (by - ay) * step.curve;
@@ -615,33 +828,46 @@ export class GhostCursor implements Effect {
       this.dx = ax + (bx - ax) * u;
       this.dy = ay + (by - ay) * u;
     }
-    let scale = 1;
-    if (step.click) {
-      const at = this.stepAt + 120;
-      if (!this.stepFired && t >= at) {
-        this.stepFired = true;
-        this.ringAt = t;
-        this.pressAt = t;
-      }
+
+    // A hand over the link once it is really there; an arrow again once it is off it.
+    const there = Math.hypot(this.x - this.tx, this.y - this.ty);
+    let point = this.pointing;
+    if (step.point && this.targetHand && there < 2.5) point = true;
+    if (point && (step.leave || !step.point) && (this.x < this.rL || this.x > this.rR || this.y < this.rT || this.y > this.rB)) point = false;
+    if (point !== this.pointing) {
+      this.pointing = point;
+      this.ghost!.classList.toggle('pointing', point);
     }
+    // An I-beam while it is on the text, an arrow again once it lifts off.
+    let read = this.reading;
+    if (step.read && there < 2.5) read = true;
+    if (read && !step.read && Math.hypot(this.x - this.stepX0, this.y - this.stepY0) > 8) read = false;
+    if (read !== this.reading) {
+      this.reading = read;
+      this.ghost!.classList.toggle('reading', read);
+    }
+
+    // The press happens only once it has truly arrived.
+    if (step.click && !this.stepFired && t >= this.stepAt + 120 && there < 1) {
+      this.stepFired = true;
+      this.ringAt = t;
+      this.pressAt = t;
+    }
+    let scale = 1;
     if (!this.reduced) {
       const p = (t - this.pressAt) / 260;
-      if (p >= 0 && p < 1) scale = 1 - 0.1 * Math.sin(p * Math.PI);
+      if (p >= 0 && p < 1) scale = 1 - 0.08 * Math.sin(p * Math.PI);
     }
-    if (step.leave) this.leaveAlpha = 1 - smooth((k - 0.25) / 0.65);
-    this.render(t, dt, omega, this.leaveAlpha, scale);
+    if (step.leave) this.leaveAlpha = 1 - smooth((k - 0.45) / 0.55);
+    if (step.hold && (!step.click || this.stepFired)) this.holdUntil = this.stepAt + step.dur;
+    this.render(t, dt, this.reduced ? 14 : 34, this.leaveAlpha, scale, false);
   }
 
   private endX = 0;
   private endY = 0;
   private stepEnd(step: Step): void {
-    if (step.rel) {
-      this.endX = this.tx - this.sx + step.x;
-      this.endY = this.ty - this.sy + step.y;
-    } else {
-      this.endX = step.x;
-      this.endY = step.y;
-    }
+    this.endX = step.rel ? this.tx + step.x : step.x;
+    this.endY = step.rel ? this.ty + step.y : step.y;
   }
 
   /** Your path from a moment ago, smoothly interpolated, held slightly to one side. */
@@ -677,7 +903,7 @@ export class GhostCursor implements Effect {
     }
     // The offset sways a little while it moves, so it never feels bolted on.
     // (Keyed to the replayed path's time, so it holds still when you do.)
-    const wob = Math.sin((Math.min(want, this.pt) - this.spawnAt) * 0.0007) * 0.35;
+    const wob = Math.sin((Math.min(want, this.pt) - this.spawnAt) * 0.0007) * 0.3;
     const c = Math.cos(wob);
     const s = Math.sin(wob);
     let gx = x + this.offX * c - this.offY * s;
@@ -690,29 +916,61 @@ export class GhostCursor implements Effect {
     }
     this.dx = gx;
     this.dy = gy;
+    if (want > this.pt + 20 && b >= 1) this.holdUntil = Math.min(this.pt + this.delay + WANDER_AFTER, this.autonomyAt);
   }
 
-  /** No pointer to copy: small, unhurried trips nearby, with pauses. */
+  private startWander(t: number, pause: number): void {
+    this.wFromX = this.wToX = this.dx;
+    this.wFromY = this.wToY = this.dy;
+    this.wAt = t;
+    this.wDur = 1;
+    this.wNext = t + pause;
+  }
+
+  /** No pointer to copy: small, unhurried, bowed trips nearby, with pauses. */
   private wander(t: number): void {
     if (t >= this.wNext && t - this.wAt >= this.wDur) {
       const r = this.rnd;
-      const a = r() * Math.PI * 2;
+      // A new heading, never straight back the way it came.
+      let a = r() * Math.PI * 2;
+      if (this.wAngle === this.wAngle) {
+        const back = this.wAngle + Math.PI;
+        // Signed angle from straight back to the new heading, in -PI..PI.
+        const diff = ((a - back + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
+        if (Math.abs(diff) < 1.1) a = back + (diff < 0 ? -1 : 1) * (1.1 + r() * 1.2);
+      }
       const d = 50 + r() * 110;
       this.wFromX = this.dx;
       this.wFromY = this.dy;
       this.wToX = Math.min(this.vw - 40, Math.max(40, this.dx + Math.cos(a) * d));
       this.wToY = Math.min(this.vh - 40, Math.max(60, this.dy + Math.sin(a) * d));
+      this.wAngle = Math.atan2(this.wToY - this.wFromY, this.wToX - this.wFromX);
+      this.wCurve = (r() < 0.5 ? -1 : 1) * (0.12 + r() * 0.18);
       this.wAt = t;
-      this.wDur = (650 + d * 3) * (this.reduced ? 1.8 : 1);
+      this.wDur = (650 + d * 3) * (this.reduced ? 1.6 : 1);
       this.wNext = t + this.wDur + 400 + r() * 900;
     }
-    const e = minJerk(clamp01((t - this.wAt) / this.wDur));
-    this.dx = this.wFromX + (this.wToX - this.wFromX) * e;
-    this.dy = this.wFromY + (this.wToY - this.wFromY) * e;
+    const k = (t - this.wAt) / this.wDur;
+    if (k >= 1) {
+      this.dx = this.wToX;
+      this.dy = this.wToY;
+      this.holdUntil = Math.min(this.wNext, this.autonomyAt);
+      return;
+    }
+    const u = minJerk(clamp01(k));
+    const ax = this.wFromX;
+    const ay = this.wFromY;
+    const bx = this.wToX;
+    const by = this.wToY;
+    const mx = (ax + bx) * 0.5 - (by - ay) * this.wCurve;
+    const my = (ay + by) * 0.5 + (bx - ax) * this.wCurve;
+    const iu = 1 - u;
+    this.dx = iu * iu * ax + 2 * iu * u * mx + u * u * bx;
+    this.dy = iu * iu * ay + 2 * iu * u * my + u * u * by;
   }
 
   /** Spring toward the desired point, record, write to the DOM, and decide whether to keep going. */
-  private render(t: number, dt: number, omega: number, alpha: number, scale: number): void {
+  private render(t: number, dt: number, omega: number, alpha: number, scale: number, capped: boolean): void {
     // Critically damped spring, exact for any frame time: smooth and never overshoots.
     const s = dt / 1000;
     const ex = Math.exp(-omega * s);
@@ -724,15 +982,14 @@ export class GhostCursor implements Effect {
     tmp = (this.vy + omega * d) * s;
     this.y = this.dy + (d + tmp) * ex;
     this.vy = (this.vy - omega * tmp) * ex;
-    if (this.reduced) {
-      // Never fast: cap the speed outright.
-      const v = Math.hypot(this.vx, this.vy);
-      if (v > 320) {
-        this.vx *= 320 / v;
-        this.vy *= 320 / v;
-      }
+    let v = Math.hypot(this.vx, this.vy);
+    if (capped && v > 320) {
+      // Reduced motion while copying you: never fast.
+      this.vx *= 320 / v;
+      this.vy *= 320 / v;
+      v = 320;
     }
-    const v = Math.hypot(this.vx, this.vy) / 1000;
+    v /= 1000;
     this.speed += (v - this.speed) * Math.min(1, dt / 40);
     this.alpha = alpha;
 
@@ -743,106 +1000,160 @@ export class GhostCursor implements Effect {
     this.rhHead = (this.rhHead + 1) % RHIST;
     if (this.rhCount < RHIST) this.rhCount++;
 
-    this.place(this.ghost!, this.x, this.y, scale, alpha, true);
-    this.drawTrails(t, alpha);
-    this.drawRing(t, alpha);
+    this.placeGhost(scale, alpha);
+    this.drawTrails(v, alpha);
+    const ringing = this.drawRing(t, alpha);
 
-    // Keep animating unless it is holding perfectly still with nothing to wait for.
-    const still =
-      this.phase === 'follow' &&
-      this.histCount > 0 &&
-      t - this.spawnAt > 1500 &&
-      t - this.blendAt > 700 &&
-      t - this.pt > this.delay + 50 &&
+    // Sleep while it holds perfectly still and nothing else is changing.
+    const settled =
+      this.holdUntil - t > 30 &&
+      !ringing &&
+      !this.trailOn &&
+      (this.phase !== 'follow' || t - this.spawnAt > (this.reduced ? 1400 : 900)) &&
       Math.abs(this.x - this.dx) < 0.05 &&
       Math.abs(this.y - this.dy) < 0.05 &&
-      Math.abs(this.vx) + Math.abs(this.vy) < 1 &&
-      !this.trailOn;
-    if (still) {
-      // Asleep until you move again or it is time to act.
-      this.idleTimer = window.setTimeout(() => this.wake(), Math.max(16, this.autonomyAt - t));
+      v < 0.001;
+    if (settled) {
+      this.idleTimer = window.setTimeout(() => this.wake(), this.holdUntil - t);
     } else {
       this.raf = requestAnimationFrame(this.frame);
     }
   }
 
-  private place(el: HTMLElement, x: number, y: number, scale: number, alpha: number, main: boolean): void {
-    // Snap to device pixels like a real pointer, so the arrow stays crisp.
-    const px = Math.round(x * this.dpr) / this.dpr - SHIFT;
-    const py = Math.round(y * this.dpr) / this.dpr - SHIFT;
+  /** Device-pixel snapping, like a real pointer, so the cursor stays crisp. */
+  private snap(v: number): number {
+    return Math.round(v * this.dpr) / this.dpr - SHIFT;
+  }
+
+  private placeGhost(scale: number, alpha: number): void {
+    const el = this.ghost!;
+    const px = this.snap(this.x);
+    const py = this.snap(this.y);
+    if (px !== this.wX || py !== this.wY || scale !== this.wS) {
+      el.style.transform = scale === 1 ? `translate3d(${px}px,${py}px,0)` : `translate3d(${px}px,${py}px,0) scale(${scale})`;
+      this.wX = px;
+      this.wY = py;
+      this.wS = scale;
+    }
     const a = Math.round(alpha * 1000) / 1000;
-    if (main) {
-      if (px !== this.wX || py !== this.wY || scale !== this.wS) {
-        el.style.transform = scale === 1 ? `translate3d(${px}px,${py}px,0)` : `translate3d(${px}px,${py}px,0) scale(${scale})`;
-        this.wX = px;
-        this.wY = py;
-        this.wS = scale;
-      }
-      if (a !== this.wA) {
-        el.style.opacity = String(a * 0.78);
-        this.wA = a;
-      }
-    } else {
-      el.style.transform = `translate3d(${px}px,${py}px,0)`;
-      el.style.opacity = String(a);
+    if (a !== this.wA) {
+      el.style.opacity = String(a * 0.78);
+      this.wA = a;
     }
   }
 
-  /** Afterimages: where it was a few frames ago, only visible when it moves fast. */
-  private drawTrails(t: number, alpha: number): void {
+  /**
+   * Afterimages: a short smear back along the path it just travelled, spaced by
+   * distance and scaled by its speed right now, so it reads as motion blur.
+   */
+  private drawTrails(v: number, alpha: number): void {
     if (!this.trails.length) return;
-    const k = smooth((this.speed - 0.3) / 0.9) * alpha;
-    if (k < 0.004) {
+    const k = smooth((v - 0.35) / 0.9) * alpha;
+    if (k * TRAIL_ALPHA[0] < 0.01) {
       if (this.trailOn) {
-        for (let i = 0; i < this.trails.length; i++) this.trails[i].style.opacity = '0';
+        for (let i = 0; i < this.trails.length; i++) {
+          this.trails[i].style.opacity = '0';
+          this.trailW[i * 3 + 2] = 0;
+        }
         this.trailOn = false;
       }
       return;
     }
     this.trailOn = true;
-    // Close-packed, so it smears like motion blur instead of stamping copies.
-    const lag = Math.min(TRAIL_LAG, TRAIL_GAP / Math.max(0.01, this.speed));
-    for (let i = 0; i < this.trails.length; i++) {
-      const want = t - (i + 1) * lag;
-      this.sampleRendered(want);
-      this.place(this.trails[i], this.sX, this.sY, 1, k * TRAIL_ALPHA[i], false);
-    }
-  }
-
-  private sX = 0;
-  private sY = 0;
-  private sampleRendered(want: number): void {
+    const length = Math.min(TRAIL_MAX, v * 26);
     const h = this.rhist;
-    let newer = (this.rhHead - 1 + RHIST) % RHIST;
-    for (let n = 1; n < this.rhCount; n++) {
-      const older = (newer - 1 + RHIST) % RHIST;
-      const to = h[older * 3 + 2];
-      if (to <= want) {
-        const tn = h[newer * 3 + 2];
-        const f = tn > to ? (want - to) / (tn - to) : 1;
-        this.sX = h[older * 3] + (h[newer * 3] - h[older * 3]) * f;
-        this.sY = h[older * 3 + 1] + (h[newer * 3 + 1] - h[older * 3 + 1]) * f;
-        return;
+    let idx = (this.rhHead - 1 + RHIST) % RHIST;
+    let ax = h[idx * 3];
+    let ay = h[idx * 3 + 1];
+    let walked = 0;
+    let n = 1;
+    for (let i = 0; i < this.trails.length; i++) {
+      const want = (length * (i + 1)) / this.trails.length;
+      let x = ax;
+      let y = ay;
+      // Walk back along the recorded path until `want` px are covered.
+      for (;;) {
+        if (n >= this.rhCount) break;
+        const prev = (idx - 1 + RHIST) % RHIST;
+        const bx = h[prev * 3];
+        const by = h[prev * 3 + 1];
+        const seg = Math.hypot(bx - ax, by - ay);
+        if (walked + seg >= want) {
+          const f = seg > 0 ? (want - walked) / seg : 0;
+          x = ax + (bx - ax) * f;
+          y = ay + (by - ay) * f;
+          break;
+        }
+        walked += seg;
+        ax = bx;
+        ay = by;
+        idx = prev;
+        n++;
+        x = ax;
+        y = ay;
       }
-      newer = older;
+      this.placeTrail(i, x, y, k * TRAIL_ALPHA[i]);
     }
-    this.sX = h[newer * 3];
-    this.sY = h[newer * 3 + 1];
   }
 
-  /** The phantom click: one slow ring opening from the tip. */
-  private drawRing(t: number, alpha: number): void {
-    const ring = this.ring!;
-    const dur = this.reduced ? 1400 : 850;
-    const k = (t - this.ringAt) / dur;
-    if (k < 0 || k > 1) {
-      if (ring.style.opacity !== '0') ring.style.opacity = '0';
-      return;
+  private placeTrail(i: number, x: number, y: number, alpha: number): void {
+    const el = this.trails[i];
+    const w = this.trailW;
+    const px = this.snap(x);
+    const py = this.snap(y);
+    const a = Math.round(alpha * 1000) / 1000;
+    if (px !== w[i * 3] || py !== w[i * 3 + 1]) {
+      el.style.transform = `translate3d(${px}px,${py}px,0)`;
+      w[i * 3] = px;
+      w[i * 3 + 1] = py;
     }
-    const e = 1 - (1 - k) * (1 - k) * (1 - k);
-    const sc = 0.12 + e * (this.reduced ? 0.6 : 0.88);
-    const a = (k < 0.12 ? smooth(k / 0.12) : 1 - smooth((k - 0.12) / 0.88)) * (this.reduced ? 0.4 : 0.7) * alpha;
-    ring.style.transform = `translate3d(${this.x}px,${this.y}px,0) scale(${sc})`;
-    ring.style.opacity = String(Math.round(a * 1000) / 1000);
+    if (a !== w[i * 3 + 2]) {
+      el.style.opacity = String(a);
+      w[i * 3 + 2] = a;
+    }
+  }
+
+  /** The phantom click: the glow swells, and two soft ripples open from the tip. */
+  private drawRing(t: number, alpha: number): boolean {
+    const dur = this.reduced ? 1400 : 950;
+    let busy = false;
+    for (let i = 0; i < this.rings.length; i++) {
+      const k = (t - this.ringAt - i * 280) / dur;
+      let a = 0;
+      let sc = 1;
+      if (k >= 0 && k <= 1) {
+        busy = true;
+        const e = 1 - (1 - k) * (1 - k) * (1 - k);
+        sc = 0.3 + e * 0.7;
+        a = (k < 0.15 ? smooth(k / 0.15) : 1 - smooth((k - 0.15) / 0.85)) * (i ? 0.17 : 0.3) * (this.reduced ? 0.7 : 1) * alpha;
+      } else if (k < 0) busy = true;
+      a = Math.round(a * 1000) / 1000;
+      const w = this.ringW;
+      const o = i * 4;
+      if (a > 0) {
+        const px = Math.round(this.x * 2) / 2;
+        const py = Math.round(this.y * 2) / 2;
+        sc = Math.round(sc * 1000) / 1000;
+        if (px !== w[o] || py !== w[o + 1] || sc !== w[o + 2]) {
+          this.rings[i].style.transform = `translate3d(${px}px,${py}px,0) scale(${sc})`;
+          w[o] = px;
+          w[o + 1] = py;
+          w[o + 2] = sc;
+        }
+      }
+      if (a !== w[o + 3]) {
+        this.rings[i].style.opacity = String(a);
+        w[o + 3] = a;
+      }
+    }
+    // The cold glow around the cursor swells with the press and settles back.
+    const g = (t - this.ringAt) / (this.reduced ? 1200 : 800);
+    const swell = g >= 0 && g < 1 ? Math.sin(g * Math.PI) * (1 - g * 0.3) : 0;
+    const q = Math.round(swell * 100) / 100;
+    if (q !== this.auraW && this.aura) {
+      this.aura.style.transform = q ? `scale(${1 + q * 0.5})` : '';
+      this.auraW = q;
+    }
+    return busy && t - this.ringAt < dur + 280;
   }
 }
