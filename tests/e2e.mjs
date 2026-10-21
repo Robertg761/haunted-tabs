@@ -327,6 +327,24 @@ try {
     afterGraves.length === 1 && afterGraves[0].url.startsWith(`${origin}/plain`) && !afterGraves.some((g) => before.some((b) => b.id === g.id)),
     `removing graves never loses a burial made at the same moment (${afterGraves.length} left)`,
   );
+
+  // Closing from the popup skips the leave-page prompt. A page that cannot be
+  // checked for unsaved input (here: too busy to answer) must not be closed.
+  const busyPage = await context.newPage();
+  await busyPage.goto(`${origin}/form#busy`);
+  await busyPage.fill('#name', 'unsaved thoughts');
+  const busyId = await sw.evaluate(async (url) => (await chrome.tabs.query({})).find((t) => t.url === url).id, `${origin}/form#busy`);
+  await control.bringToFront();
+  await sw.evaluate((id) => {
+    chrome.scripting.executeScript({ target: { tabId: id }, world: 'MAIN', func: () => { const end = Date.now() + 5000; while (Date.now() < end); } });
+  }, busyId);
+  await sleep(300);
+  const busyBury = await ask({ type: 'bury', tabId: busyId });
+  check(busyBury.ok === false && /Couldn't check/.test(busyBury.reason ?? ''), `a tab that cannot be checked is not closed (${busyBury.reason})`);
+  await sleep(5000);
+  check((await busyPage.inputValue('#name')) === 'unsaved thoughts', 'and its input is still there');
+  await busyPage.close();
+
 } catch (err) {
   console.error(err);
   failures++;

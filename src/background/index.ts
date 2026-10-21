@@ -49,6 +49,8 @@ interface SessionState {
   startedAt?: number;
   /** How long the browser was closed before this session, while haunting was on. */
   downtime?: { from: number; ms: number };
+  /** The missed alarm whose sleep has been skipped already. */
+  sleptThrough?: number;
 }
 
 /**
@@ -231,6 +233,19 @@ async function tryClean(tabId: number, what: { restore?: boolean; sweep?: boolea
     }
   }
   return 'done';
+}
+
+/**
+ * Whether our script still answers in a tab's page. 'busy' means a page is there
+ * but did not answer in time, which says nothing about whether it is still ours.
+ */
+async function probe(tabId: number): Promise<'alive' | 'gone' | 'busy'> {
+  try {
+    await withTimeout(ext.tabs.sendMessage(tabId, { type: 'haunt:ping' } satisfies PageCommand));
+    return 'alive';
+  } catch (err) {
+    return err === TIMED_OUT ? 'busy' : 'gone';
+  }
 }
 
 /** Unloaded or frozen tabs keep their last face; there is no page to repaint. */
@@ -551,6 +566,10 @@ const RETURN_TTL = 2 * 60_000;
 
 /** The user looked at a tab: it comes back to life, possibly not quietly. */
 async function wake(tabId: number, windowId: number): Promise<void> {
+  const tab = await ext.tabs.get(tabId).catch(() => undefined);
+  // Straight after a sleep the tick alarm may not have caught up yet. Do it now,
+  // or the tab you switch to greets you with the hours the computer slept.
+  await skipSleepBeforeAlarm(tab?.lastAccessed);
   const now = Date.now();
   const previous = state.activeByWindow[windowId];
   if (previous !== undefined && state.records[previous]) state.records[previous].lastSeen = now;
@@ -561,7 +580,6 @@ async function wake(tabId: number, windowId: number): Promise<void> {
     const idle = now - rec.lastSeen;
     rec.lastSeen = now;
     rec.safeDiscarded = false;
-    const tab = await ext.tabs.get(tabId).catch(() => undefined);
     // A waking tab can briefly report about:blank (Firefox); judge it by where it really is.
     const known = tab && tab.url === 'about:blank' && rec.url ? { ...tab, url: rec.url } : tab;
     const stage =
@@ -779,9 +797,13 @@ async function handle(req: PopupRequest): Promise<unknown> {
     case 'bury': {
       const tab = await ext.tabs.get(req.tabId);
       // Closing skips the browser's leave-page prompt, so half-written input would be lost.
+      // Pages no extension may look into (chrome://, the Web Store) close as asked.
       if (!tab.discarded && isHauntableUrl(tab.url)) {
         const res = await send<{ ok: boolean; dirty: boolean }>(tab.id!, { type: 'haunt:dirty' }, true);
         if (res?.dirty) return { ok: false, reason: 'That tab has unsaved input, so it stays open. Finish it there first.' };
+        if (res?.ok !== true) {
+          return { ok: false, reason: "Couldn't check that tab for unsaved input, so it stays open. Close it yourself if you're sure." };
+        }
       }
       await bury(tab, recordFor(tab, Date.now()), 'you', Date.now());
       await persist();
@@ -833,14 +855,35 @@ ext.runtime.onMessage.addListener((msg: PopupRequest | PageEvent, sender, sendRe
  * tab ages through it, so waking up does not entomb (and bury) everything at once.
  */
 async function skipSleep(alarm: chrome.alarms.Alarm): Promise<void> {
-  // A late alarm from before this browser session is covered by `downtime`.
-  if (!settings.enabled || alarm.scheduledTime < (state.startedAt ?? 0)) return;
+  if (!sleepSkippable(alarm.scheduledTime)) return;
   const next = await ext.alarms.get(TICK_ALARM);
   if (!next) return;
-  const slept = sleptMs(alarm.scheduledTime, next.scheduledTime, (alarm.periodInMinutes ?? 0.5) * 60_000);
+  skipSlept(alarm.scheduledTime, sleptMs(alarm.scheduledTime, next.scheduledTime, (alarm.periodInMinutes ?? 0.5) * 60_000));
+}
+
+/**
+ * You woke the computer and went straight to a tab, before the late alarm ran.
+ * `browserNow` is a time the browser stamped just now (the tab's lastAccessed),
+ * on the same clock the alarm is scheduled by.
+ */
+async function skipSleepBeforeAlarm(browserNow: number | undefined): Promise<void> {
+  if (browserNow === undefined) return;
+  const next = await ext.alarms.get(TICK_ALARM);
+  if (!next || !sleepSkippable(next.scheduledTime)) return;
+  skipSlept(next.scheduledTime, sleptMs(next.scheduledTime, browserNow, 0));
+}
+
+function sleepSkippable(dueAt: number): boolean {
+  // A late alarm from before this browser session is covered by `downtime`, and
+  // a sleep already skipped when you switched tabs is not skipped twice.
+  return settings.enabled && dueAt >= (state.startedAt ?? 0) && dueAt !== state.sleptThrough;
+}
+
+function skipSlept(dueAt: number, slept: number): void {
   if (!slept) return;
+  state.sleptThrough = dueAt;
   const now = Date.now();
-  for (const rec of Object.values(state.records)) rec.lastSeen = skipDowntime(rec.lastSeen, alarm.scheduledTime, slept, now);
+  for (const rec of Object.values(state.records)) rec.lastSeen = skipDowntime(rec.lastSeen, dueAt, slept, now);
 }
 
 ext.alarms.onAlarm.addListener((alarm) => {
@@ -908,8 +951,12 @@ ext.tabs.onUpdated.addListener((tabId, info, tab) => {
       rec.loadingAt = undefined;
       // Chrome reports pushState and #hash changes as loads too. If our script
       // still answers, the page (and whatever we left in it) is still there.
-      const survived = (await send<{ ok: boolean }>(tabId, { type: 'haunt:ping' }, false))?.ok;
-      if (!survived) {
+      const page = await probe(tabId);
+      if (page === 'busy') {
+        // No telling yet. Keep every mark (an Exorcise may still be owed), but
+        // repaint on the next tick in case this is a new page without our paint.
+        rec.appliedTitle = undefined;
+      } else if (page === 'gone') {
         forgetPage(rec);
         // Firefox wakes an unloaded tab as a placeholder first and only then really
         // reloads it, wiping a visit that has only just played. Play it again.
