@@ -25,6 +25,7 @@ const pages = {
   '/alpha': `<title>Alpha page</title><link rel="icon" href="/fav.svg"><h1 style="font:48px sans-serif">Alpha: a perfectly normal page</h1><p>Lorem ipsum dolor sit amet.</p>`,
   '/form': `<title>Form page</title><link rel="icon" href="/fav.svg"><form><input id="name"><textarea></textarea></form>`,
   '/plain': `<title>Plain page</title><p>No favicon here.</p>`,
+  '/editor': `<title>Editor page</title><div contenteditable="true"><p>A draft the page loaded or someone typed</p></div>`,
   '/ticker': `<title>Ticker 0</title><link rel="icon" href="/fav.svg"><script>let n=0;setInterval(()=>{document.title='Ticker '+(++n)},300)</script>`,
 };
 const server = createServer((req, res) => {
@@ -340,10 +341,23 @@ try {
   }, busyId);
   await sleep(300);
   const busyBury = await ask({ type: 'bury', tabId: busyId });
-  check(busyBury.ok === false && /Couldn't check/.test(busyBury.reason ?? ''), `a tab that cannot be checked is not closed (${busyBury.reason})`);
+  check(busyBury.ok === false && /isn't responding/.test(busyBury.reason ?? ''), `a tab that cannot be checked is not closed (${busyBury.reason})`);
+  const insisted = await ask({ type: 'bury', tabId: busyId, force: true });
+  check(insisted.ok === false, 'and burying it again does not force a busy page closed');
   await sleep(5000);
   check((await busyPage.inputValue('#name')) === 'unsaved thoughts', 'and its input is still there');
   await busyPage.close();
+
+  // An editor holding text we never saw typed is a doubt the user may settle by burying again.
+  const editorPage = await context.newPage();
+  await editorPage.goto(`${origin}/editor`);
+  const editorId = await sw.evaluate(async (url) => (await chrome.tabs.query({})).find((t) => t.url === url).id, `${origin}/editor`);
+  await control.bringToFront();
+  const doubt = await ask({ type: 'bury', tabId: editorId });
+  check(doubt.ok === false && doubt.unchecked === true && /editor/.test(doubt.reason ?? ''), `an editor with text is not closed at first (${doubt.reason})`);
+  const settled = await ask({ type: 'bury', tabId: editorId, force: true });
+  const editorGone = await sw.evaluate(async (id) => !(await chrome.tabs.get(id).catch(() => null)), editorId);
+  check(settled.ok === true && editorGone, 'burying it again closes it');
 
 } catch (err) {
   console.error(err);

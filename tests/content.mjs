@@ -117,7 +117,7 @@ try {
   check(r?.dirty === true, 'typing in a shadow root is noticed');
   await tab.goto(origin + '/frame');
   r = await send('/frame', { type: 'haunt:dirty' });
-  check(r?.dirty === false, 'unfocused editor frame is clean');
+  check(r?.dirty === true && r?.sure === false, 'an editor frame holding text we never saw typed is a doubt, not a certainty');
   await tab.frameLocator('#f').locator('body').click();
   r = await send('/frame', { type: 'haunt:dirty' }, false);
   check(r?.dirty === true, 'focus in a same-origin editor frame counts');

@@ -217,6 +217,28 @@ async function send<T>(tabId: number, cmd: PageCommand, inject: boolean): Promis
 }
 
 /**
+ * Whether a tab may hold unsaved input. 'maybe' is an editor holding text we didn't
+ * see typed; 'busy' a page that didn't answer in time (it may well hold a draft);
+ * 'unreachable' a page we have no access to.
+ */
+async function checkUnsaved(tabId: number): Promise<'clean' | 'dirty' | 'maybe' | 'busy' | 'unreachable'> {
+  type Reply = { ok: boolean; dirty: boolean; sure?: boolean };
+  const verdict = (r: Reply | undefined) => (r?.ok !== true ? 'unreachable' : !r.dirty ? 'clean' : r.sure === false ? 'maybe' : 'dirty');
+  const cmd: PageCommand = { type: 'haunt:dirty' };
+  try {
+    return verdict((await withTimeout(ext.tabs.sendMessage(tabId, cmd))) as Reply);
+  } catch (err) {
+    if (err === TIMED_OUT) return 'busy';
+  }
+  try {
+    await withTimeout(ext.scripting.executeScript({ target: { tabId }, files: ['content.js'] }));
+    return verdict((await withTimeout(ext.tabs.sendMessage(tabId, cmd))) as Reply);
+  } catch (err) {
+    return err === TIMED_OUT ? 'busy' : 'unreachable';
+  }
+}
+
+/**
  * Ask a page to drop our paint (`restore`) and/or its cobwebs (`sweep`).
  * 'frozen' means the page exists but could not answer yet, so the caller must
  * try again later. A page with nobody listening has nothing of ours to clean.
@@ -799,9 +821,15 @@ async function handle(req: PopupRequest): Promise<unknown> {
       // Closing skips the browser's leave-page prompt, so half-written input would be lost.
       // Pages no extension may look into (chrome://, the Web Store) close as asked.
       if (!tab.discarded && isHauntableUrl(tab.url)) {
-        const res = await send<{ ok: boolean; dirty: boolean }>(tab.id!, { type: 'haunt:dirty' }, true);
-        if (res?.dirty) return { ok: false, reason: 'That tab has unsaved input, so it stays open. Finish it there first.' };
-        if (res?.ok !== true && !req.force) {
+        // Only doubt the user can settle may be overridden by burying again: never
+        // typed input, and never a page too busy to answer (it may be holding a draft).
+        const unsaved = await checkUnsaved(tab.id!);
+        if (unsaved === 'dirty') return { ok: false, reason: 'That tab has unsaved input, so it stays open. Finish it there first.' };
+        if (unsaved === 'busy') return { ok: false, reason: "That tab isn't responding, so it can't be checked for unsaved input. It stays open." };
+        if (unsaved === 'maybe' && !req.force) {
+          return { ok: false, unchecked: true, reason: 'That tab has an editor with text in it that may not be saved. Bury it again to close it anyway.' };
+        }
+        if (unsaved === 'unreachable' && !req.force) {
           return { ok: false, unchecked: true, reason: "Couldn't check that tab for unsaved input. Bury it again to close it anyway." };
         }
       }

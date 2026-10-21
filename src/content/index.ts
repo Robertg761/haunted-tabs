@@ -270,8 +270,34 @@ const NOT_INPUT = new Set(['hidden', 'submit', 'button', 'reset', 'image', 'file
  * document, open shadow roots and same-origin frames (where rich editors live),
  * and counts a focused editor as in use.
  */
-function hasUnsavedInput(): boolean {
-  return dirtyByInput || hasEdits(document, 0) || editingNow();
+/**
+ * 'yes' when we saw typing or a field differs from its default; 'maybe' when an
+ * editor holds text but we weren't here to see whether it was typed (the script
+ * can be injected late, e.g. by a bury from the popup).
+ */
+function unsavedInput(): 'yes' | 'maybe' | 'no' {
+  if (dirtyByInput || hasEdits(document, 0) || editingNow()) return 'yes';
+  return editorHoldsText(document, 0) ? 'maybe' : 'no';
+}
+
+/** A contenteditable or designMode editor with text in it, here or in a shadow root or same-origin frame. */
+function editorHoldsText(root: Document | ShadowRoot, depth: number): boolean {
+  if (root instanceof Document || (root as Node).nodeType === Node.DOCUMENT_NODE) {
+    const doc = root as Document;
+    if (doc.designMode === 'on' && !!doc.body?.textContent?.trim()) return true;
+  }
+  for (const el of Array.from(root.querySelectorAll<HTMLElement>('[contenteditable]'))) {
+    if (el.isContentEditable && !el.closest(`[${OUR_ATTR}]`) && !!el.textContent?.trim()) return true;
+  }
+  if (depth >= 4) return false;
+  for (const el of Array.from(root.querySelectorAll('*'))) {
+    if (el.hasAttribute(OUR_ATTR)) continue;
+    const shadow = shadowOf(el);
+    if (shadow && editorHoldsText(shadow, depth + 1)) return true;
+    const frame = frameDocument(el);
+    if (frame && editorHoldsText(frame, depth + 1)) return true;
+  }
+  return false;
 }
 
 function hasEdits(root: Document | ShadowRoot, depth: number): boolean {
@@ -461,7 +487,10 @@ function onMessage(msg: PageCommand, _sender: chrome.runtime.MessageSender, send
       sendResponse({ ok: true });
       return;
     case 'haunt:dirty':
-      sendResponse({ ok: true, dirty: hasUnsavedInput() });
+      {
+        const unsaved = unsavedInput();
+        sendResponse({ ok: true, dirty: unsaved !== 'no', sure: unsaved === 'yes' });
+      }
       return;
     case 'haunt:cobwebs': {
       // Webs settle in once a possession has let go of the screen, unless a sweep came first.
