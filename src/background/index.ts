@@ -336,6 +336,8 @@ async function tick(): Promise<void> {
         const rec = state.records[tab.id!];
         const stage = stages.get(tab.id!);
         if (!rec || stage === undefined) return;
+        // A tab pinned or playing sound while its page could not answer still wears webs or effects.
+        if (rec.needsExorcise && isProtected(tab) && !isAsleep(tab)) await restoreTab(tab.id!, rec, true);
         await paint(tab, rec, stage, now);
         if (rec.pendingStop && !isAsleep(tab)) {
           const effects = rec.pendingStop.filter((name) => unwantedEffects().includes(name));
