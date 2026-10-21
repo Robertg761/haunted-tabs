@@ -133,9 +133,9 @@ export function paintIris(R: number, scale: number, pal: Palette, rand: () => nu
   if (stage >= 4) {
     // Entombed: a faint milky film, like something long dead.
     const film = g.createRadialGradient(-R * 0.1, -R * 0.1, 0, 0, 0, R);
-    film.addColorStop(0, 'rgba(226,232,236,0.2)');
-    film.addColorStop(0.7, 'rgba(210,218,224,0.14)');
-    film.addColorStop(1, 'rgba(200,210,216,0.04)');
+    film.addColorStop(0, 'rgba(226,232,236,0.1)');
+    film.addColorStop(0.7, 'rgba(210,218,224,0.06)');
+    film.addColorStop(1, 'rgba(200,210,216,0.02)');
     g.fillStyle = film;
     g.fillRect(-R, -R, R * 2, R * 2);
   }
@@ -241,45 +241,54 @@ export function paintSclera(w: number, scale: number, rand: () => number, stage:
 }
 
 /**
- * A lump of darkness: a soft plateau with an eroded, smoky edge. A few of these
- * drifting over one another read as living shadow rather than an airbrushed blot.
+ * The core of the darkness: a soft-shouldered disc (stretched to an oval when
+ * drawn) whose alpha carries faint, fine noise, so it reads as dimness in the
+ * air rather than an airbrushed blot. The very centre stays solid.
  */
-export function paintSmoke(size: number, color: RGB, rand: () => number): HTMLCanvasElement {
+export function paintPoolCore(size: number, color: RGB, rand: () => number): HTMLCanvasElement {
   const [c, g] = surface(size, size);
-  const R = size / 2;
-  const dab = paintDab(64, color, SOFT);
-  const base = g.createRadialGradient(R, R, 0, R, R, R * 0.86);
-  base.addColorStop(0, rgba(color, 1));
-  base.addColorStop(0.3, rgba(color, 0.95));
-  base.addColorStop(0.55, rgba(color, 0.66));
-  base.addColorStop(0.75, rgba(color, 0.3));
-  base.addColorStop(0.9, rgba(color, 0.08));
-  base.addColorStop(1, rgba(color, 0));
-  g.fillStyle = base;
-  g.fillRect(0, 0, size, size);
-  // Lumps pushing outwards…
-  for (let i = 0; i < 40; i++) {
-    const a = rand() * TAU;
-    const r = R * (0.25 + rand() * 0.4);
-    const s = R * (0.2 + rand() * 0.28);
-    g.globalAlpha = 0.1 + rand() * 0.16;
-    g.drawImage(dab, R + Math.cos(a) * r - s, R + Math.sin(a) * r - s, s * 2, s * 2);
+  const img = g.createImageData(size, size);
+  // Two octaves of smooth value noise.
+  const N = 7;
+  const grid = new Float32Array((N + 1) * (N + 1));
+  const fine = new Float32Array((N * 3 + 1) * (N * 3 + 1));
+  for (let i = 0; i < grid.length; i++) grid[i] = rand();
+  for (let i = 0; i < fine.length; i++) fine[i] = rand();
+  const sample = (arr: Float32Array, n: number, u: number, v: number) => {
+    const x = u * n;
+    const y = v * n;
+    const x0 = Math.min(n - 1, Math.floor(x));
+    const y0 = Math.min(n - 1, Math.floor(y));
+    const fx = x - x0;
+    const fy = y - y0;
+    const sx = fx * fx * (3 - 2 * fx);
+    const sy = fy * fy * (3 - 2 * fy);
+    const W = n + 1;
+    const a = arr[y0 * W + x0] + (arr[y0 * W + x0 + 1] - arr[y0 * W + x0]) * sx;
+    const b = arr[(y0 + 1) * W + x0] + (arr[(y0 + 1) * W + x0 + 1] - arr[(y0 + 1) * W + x0]) * sx;
+    return a + (b - a) * sy;
+  };
+  const half = size / 2;
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const dx = (x + 0.5 - half) / half;
+      const dy = (y + 0.5 - half) / half;
+      const r = Math.sqrt(dx * dx + dy * dy);
+      if (r >= 1) continue;
+      const coarse = sample(grid, N, x / size, y / size);
+      const n = coarse * 0.6 + sample(fine, N * 3, x / size, y / size) * 0.4;
+      // Slow noise pushes the edge in and out, so the silhouette is never a clean ellipse.
+      const re = r * (1 + (coarse - 0.5) * 0.28 * r);
+      const t = Math.min(1, Math.max(0, (re - 0.42) / 0.58));
+      let a = Math.pow(1 - t * t * (3 - 2 * t), 1.15);
+      a *= 1 + (n - 0.5) * 0.16 * Math.min(1, r * 1.6);
+      const o = (y * size + x) * 4;
+      img.data[o] = color[0];
+      img.data[o + 1] = color[1];
+      img.data[o + 2] = color[2];
+      img.data[o + 3] = Math.max(0, Math.min(255, Math.round(a * 255)));
+    }
   }
-  // …and bites taken out of the edge.
-  g.globalCompositeOperation = 'destination-out';
-  for (let i = 0; i < 26; i++) {
-    const a = rand() * TAU;
-    const r = R * (0.6 + rand() * 0.34);
-    const s = R * (0.14 + rand() * 0.24);
-    g.globalAlpha = 0.14 + rand() * 0.24;
-    g.drawImage(dab, R + Math.cos(a) * r - s, R + Math.sin(a) * r - s, s * 2, s * 2);
-  }
-  // Nothing may reach the border, or the lump would show a hard edge.
-  g.globalAlpha = 1;
-  const rim = g.createRadialGradient(R, R, R * 0.8, R, R, R);
-  rim.addColorStop(0, 'rgba(0,0,0,0)');
-  rim.addColorStop(1, 'rgba(0,0,0,1)');
-  g.fillStyle = rim;
-  g.fillRect(0, 0, size, size);
+  g.putImageData(img, 0, 0);
   return c;
 }
