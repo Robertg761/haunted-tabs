@@ -5,7 +5,7 @@
 // re-checked densely before they are used. If nowhere is truly empty, there is
 // no spot: the eyes never open over the page's content.
 
-import { OUR_ATTR } from './overlay';
+import { OUR_ATTR, type Area } from './overlay';
 
 const CELL = 16;
 const MAX_ELEMENTS = 1200;
@@ -130,6 +130,11 @@ export class Scan {
     this.hardSum = summed(this.hard, this.cols, this.rows);
     this.softSum = summed(this.soft, this.cols, this.rows);
     return true;
+  }
+
+  /** Other creatures' ground (a web, a drip's column): as good as content. */
+  block(areas: Area[]): void {
+    for (const a of areas) this.mark(a.x, a.y, a.x + a.w, a.y + a.h, 8, this.hard);
   }
 
   /** Queue a dense re-check of a rect (sub-grid sized things like icons and short links). */
