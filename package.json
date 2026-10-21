@@ -9,7 +9,8 @@
     "e2e": "npm run build && node tests/e2e.mjs",
     "icons": "node scripts/make-icons.mjs",
     "lint:firefox": "web-ext lint --source-dir dist/firefox",
-    "e2e:firefox": "npm run build && node tests/e2e-firefox.mjs"
+    "e2e:firefox": "npm run build && node tests/e2e-firefox.mjs",
+    "test:popup": "npm run build && node tests/popup-smoke.mjs"
   },
   "repository": {
     "type": "git",
