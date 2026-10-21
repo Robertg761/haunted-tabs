@@ -54,6 +54,34 @@ let timelineFor = NaN;
 let shownLevel = -1;
 /** Settings waiting on a permission prompt or a save; the 1 s refresh must not undo them. */
 const pending = new Set<string>();
+/** Tabs with a bury or discard on its way, so a double click or a held key acts once. */
+const busy = new Set<number>();
+
+/**
+ * Until the first snapshot arrives (the background may need a moment to wake), lay the
+ * popup out the way it looked last time: the haunt level card or the introduction in
+ * place, the switch in position. Otherwise the toolbar jumps down once the answer lands.
+ */
+function bootFromHint(): void {
+  let hint: unknown;
+  try {
+    hint = JSON.parse(store.get('boot') ?? '');
+  } catch {
+    // First opening: the popup starts dormant, which is the default anyway.
+  }
+  const [on, blocked, level, name] = Array.isArray(hint) ? hint : [0, 0, 0, ''];
+  setAttr(body, 'data-level', String(on && !blocked ? level : 0));
+  body.classList.toggle('dormant', !on);
+  body.classList.toggle('no-access', !!(on && blocked));
+  enabledInput.checked = !!on;
+  $('enabled-label').textContent = on ? (blocked ? 'Needs access' : 'Haunting') : 'Dormant';
+  if (on && typeof name === 'string') $('level-name').textContent = name;
+  const introDismissed = store.get('introDismissed') === '1';
+  $('intro').hidden = !!on || introDismissed;
+  $('sleep').hidden = !!on || !introDismissed;
+  exorciseButton.disabled = !on;
+}
+bootFromHint();
 
 /** Only touch the DOM when a value really changes, so assistive tech is not told every second. */
 function setText(node: Element, text: string): void {
@@ -107,6 +135,7 @@ fit();
 // ── Notices ────────────────────────────────────────────────────────────────
 
 let noticeKey = '';
+let noticeTimer = 0;
 
 interface NoticeAction {
   label: string;
@@ -129,6 +158,9 @@ function say(text: string, tone: 'info' | 'warn' = 'info', action?: NoticeAction
     button.addEventListener('click', action.run);
     notice.append(button);
   }
+  // Passing remarks fade on their own; warnings and anything with a button stay put.
+  clearTimeout(noticeTimer);
+  if (tone === 'info' && !action) noticeTimer = window.setTimeout(() => noticeKey === key && say(''), 4000);
 }
 
 function announce(text: string): void {
@@ -142,6 +174,8 @@ function announce(text: string): void {
 function renderHeader(s: Snapshot): void {
   const on = s.settings.enabled;
   const blocked = on && !s.hostPermission;
+  const hint = JSON.stringify([on ? 1 : 0, blocked ? 1 : 0, s.level.index, s.level.name]);
+  if (store.get('boot') !== hint) store.set('boot', hint);
   setAttr(body, 'data-level', String(on && !blocked ? s.level.index : 0));
   body.classList.toggle('dormant', !on);
   body.classList.toggle('no-access', blocked);
@@ -350,11 +384,11 @@ function tabRow(t: TabView, on: boolean, thresholdMinutes: number): HTMLElement 
       type: 'button',
       tabindex: '-1',
       title: `${t.title}\n${t.url}\n\nEnter switches · → actions · Delete buries`,
-      'aria-keyshortcuts': 'Delete',
+      'aria-keyshortcuts': 'Delete Control+Backspace Meta+Backspace',
       'data-action': 'switch',
     },
     fav,
-    el('span', { class: 'info' }, el('span', { class: 'title', text: t.title || siteLabel(t.url) }), meta),
+    el('span', { class: 'info' }, el('span', { class: 'title', dir: 'auto', text: t.title || siteLabel(t.url) }), meta),
     idle,
   );
   const discard =
@@ -725,10 +759,14 @@ function banishRitual(): void {
 }
 
 async function grantAccess(): Promise<void> {
-  const granted = await requestThen({ origins: ['<all_urls>'] }, { enabled: true });
-  if (granted && (await change({ enabled: true }))) {
-    say('');
-    awaken();
+  try {
+    const granted = await requestThen({ origins: ['<all_urls>'] }, { enabled: true });
+    if (granted && (await change({ enabled: true }))) {
+      say('');
+      awaken();
+    }
+  } catch (err) {
+    say(`The browser did not ask: ${(err as Error).message}`, 'warn');
   }
 }
 
@@ -757,23 +795,39 @@ enabledInput.addEventListener('change', async () => {
   }
 });
 
+let exorcising = false;
 async function exorcise(): Promise<void> {
+  if (exorcising) return;
+  exorcising = true;
   // The Exorcise button disables itself; keep keyboard focus somewhere useful.
   const fromButton = document.activeElement === exorciseButton;
   banishRitual();
   lastSignature = '';
   say('');
+  // A refresh already on its way still says "on"; it must not flick the switch back.
+  pending.add('enabled');
+  enabledInput.checked = false;
+  exorciseButton.disabled = true;
   try {
     await load({ type: 'exorcise' });
     announce('Every tab is restored and haunting is off.');
   } catch (err) {
     say(`The exorcism faltered: ${(err as Error).message}`, 'warn');
+  } finally {
+    exorcising = false;
+    pending.delete('enabled');
+    if (snap) renderHeader(snap);
   }
   if (fromButton) enabledInput.focus();
 }
 
 exorciseButton.addEventListener('click', exorcise);
-$('graveyard').addEventListener('click', () => openGraveyard().then(() => window.close()));
+$('graveyard').addEventListener('click', () =>
+  openGraveyard().then(
+    () => window.close(),
+    (err) => say(`The Graveyard would not open: ${(err as Error).message}`, 'warn'),
+  ),
+);
 
 $('intro-dismiss').addEventListener('click', () => {
   store.set('introDismissed', '1');
@@ -819,6 +873,8 @@ function closeSettings(): void {
   );
 }
 
+const sheetBody = sheet.querySelector<HTMLElement>('.sheet-body')!;
+sheetBody.addEventListener('scroll', () => sheet.classList.toggle('scrolled', sheetBody.scrollTop > 2), { passive: true });
 settingsToggle.addEventListener('click', () => (sheet.hidden ? openSettings() : closeSettings()));
 $('settings-close').addEventListener('click', closeSettings);
 scrim.addEventListener('click', closeSettings);
@@ -869,6 +925,7 @@ for (const key of CHECKS) {
       }
       if (!granted) {
         input.checked = false;
+        announce('Whispers need permission to show notifications, so they stay off.');
         return;
       }
     }
@@ -904,8 +961,8 @@ searchInput.addEventListener('keydown', (e) => {
     return;
   }
   if (e.key !== 'Enter') return;
-  const first = list.querySelector<HTMLElement>('[data-id]');
-  if (first) ask({ type: 'switch', tabId: Number(first.dataset.id) }).then(() => window.close());
+  const first = liveRows()[0];
+  if (first) void act(first, 'switch');
 });
 groupSelect.addEventListener('change', () => {
   store.set('group', groupSelect.value);
@@ -951,18 +1008,33 @@ list.addEventListener('keydown', (e) => {
       controls[Math.max(at - 1, 0)]?.focus();
       break;
     case 'Delete':
-    case 'Backspace':
-      void act(row, 'bury');
+      if (!e.repeat) void act(row, 'bury');
       break;
+    case 'Backspace':
+      // Cmd/Ctrl+Backspace buries (Delete on a Mac keyboard). A plain Backspace is
+      // someone fixing their search, so it goes back to the search field instead.
+      if (e.metaKey || e.ctrlKey) {
+        if (!e.repeat) void act(row, 'bury');
+        break;
+      }
+      searchInput.focus();
+      return;
     default:
+      // Type to search from anywhere in the list.
+      if (e.key.length === 1 && e.key !== ' ' && !e.metaKey && !e.ctrlKey && !e.altKey) searchInput.focus();
       return;
   }
   e.preventDefault();
 });
 
+/** The browser's own wording (Chrome, then Firefox) when a tab closed since the last refresh. */
+const isGone = (err: unknown) => /no tab with id|invalid tab id/i.test(String((err as Error)?.message ?? err));
+
 async function act(row: HTMLElement, action: string | undefined): Promise<void> {
   const tabId = Number(row.dataset.id);
-  if (Number.isNaN(tabId)) return;
+  // One action per tab at a time: a double click or a held Delete must not bury twice.
+  if (Number.isNaN(tabId) || busy.has(tabId) || row.classList.contains('sinking')) return;
+  busy.add(tabId);
   try {
     if (action === 'switch') {
       await ask({ type: 'switch', tabId });
@@ -979,7 +1051,15 @@ async function act(row: HTMLElement, action: string | undefined): Promise<void> 
     }
   } catch (err) {
     row.classList.remove('sinking');
-    say(`The spirits refused: ${(err as Error).message}`, 'warn');
+    if (isGone(err)) {
+      // Closed somewhere else in the meantime: nothing to do but catch up.
+      say('That tab had already gone.');
+      await refresh();
+    } else {
+      say(`The spirits refused: ${(err as Error).message}`, 'warn');
+    }
+  } finally {
+    busy.delete(tabId);
   }
 }
 

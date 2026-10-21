@@ -5,6 +5,7 @@
  * and simply re-fits the window when it is resized.
  */
 import { between, n1, seeded, type Rand } from './rand';
+import { setSvg, svgNode } from './svg';
 
 const LANDSCAPE_SEED = 0x6a7e;
 const MARGIN = 40; // extra width on each side for the pointer parallax
@@ -296,7 +297,7 @@ function drawLandscape(): void {
     if (!svg) return;
     svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
     svg.setAttribute('preserveAspectRatio', 'none');
-    svg.innerHTML = inner;
+    setSvg(svg, inner);
   };
   const grad = (id: string, top: string, bottom: string, y1: number, y2: number): string =>
     `<defs><linearGradient id="${id}" gradientUnits="userSpaceOnUse" x1="0" y1="${n1(y1)}" x2="0" y2="${n1(y2)}"><stop offset="0" stop-color="${top}"/><stop offset="1" stop-color="${bottom}"/></linearGradient></defs>`;
@@ -430,7 +431,10 @@ function scheduleBats(reducedMotion: () => boolean): void {
       bat.style.setProperty('--size', `${(18 + Math.random() * 14).toFixed(0)}px`);
       bat.style.setProperty('--bob', `${(0.9 + Math.random() * 0.8).toFixed(2)}s`);
       bat.style.animationDelay = `${(i * (0.25 + Math.random() * 0.5)).toFixed(2)}s`;
-      bat.innerHTML = `<div class="bat-bob">${BAT_SVG}</div>`;
+      const bob = document.createElement('div');
+      bob.className = 'bat-bob';
+      bob.append(svgNode(BAT_SVG));
+      bat.append(bob);
       bat.addEventListener('animationend', (e) => e.target === bat && bat.remove());
       host.append(bat);
     }
