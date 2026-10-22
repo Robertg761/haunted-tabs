@@ -305,11 +305,11 @@ async function edit(m) {
     ['A tab manager where the tabs you neglect come back as ghosts.', 'h/2+10', 42],
     ['Real extension, real tabs, filmed in Chromium.', 'h/2+90', 32],
   ]);
-  await clip(m.enable, m.decay, 1, [caption('Turn haunting on (here with the 30-second demo threshold)')]);
+  await clip(m.enable + 1.2, m.decay, 1, [caption('Turn haunting on (here with the 30-second demo threshold)')]);
 
   // The four-minute wait, sped up to about 20 seconds, labelled with the stage the news tab is in.
   const decayEnd = m.possess;
-  const speed = (decayEnd - m.decay) / 18;
+  const speed = (decayEnd - m.decay) / 16;
   const at = (t) => ((t - m.decay) / speed).toFixed(2);
   const stages = [
     ['withering', 'Withering: the title rots, the favicon cracks'],
@@ -329,12 +329,12 @@ async function edit(m) {
   ]);
   await clip(m.possess - 0.2, m.possess + 2.6, 1, [caption('Return to a dead tab and it possesses your screen')]);
   await clip(m.possess - 0.1, m.possess + 2.2, 0.4, [caption('Again, at 0.4× speed')]);
-  await clip(m.possess + 2.6, m.sweep, 1, [caption('Then the page itself has decayed: cobwebs, dust, fog, eyes and drips')]);
-  await clip(m.sweep, m.popup, 1, [caption('Sweep the mouse: cobwebs tear and the fog wipes clear')]);
+  await clip(m.possess + 2.6, Math.min(m.sweep, m.possess + 9.6), 1, [caption('Then the page itself has decayed: cobwebs, dust, fog, eyes and drips')]);
+  await clip(m.sweep, Math.min(m.popup, m.sweep + 9), 1, [caption('Sweep the mouse: cobwebs tear and the fog wipes clear')]);
   await clip(m.popup, m.bury, 1, [caption('The popup is a real tab manager: every tab, how long it sat, how far it has rotted')]);
   await clip(m.bury, m.graveyard, 1, [caption('Bury tabs from the popup. Nothing is lost.')]);
   await clip(m.graveyard, m.exorcise, 1, [caption('They wait in the Graveyard, and one click resurrects them')]);
-  await clip(m.exorcise, m.end, 1, [caption('Exorcise: every title, favicon and page goes back to normal')]);
+  await clip(m.exorcise + 1, m.end, 1, [caption('Exorcise: every title, favicon and page goes back to normal')]);
   await card(4, [
     ['Haunted Tabs', 'h/2-110', 84],
     ['Opt-in · reversible · never deletes data · no network', 'h/2+10', 40],

@@ -27,19 +27,20 @@ No other AI models were used.
 
 ## Demo video
 
-`docs/demo.mp4` in the repo, about 80 seconds. It shows the real extension in a real Chromium window, recorded with `scripts/record-demo.mjs`:
+`docs/demo.mp4` in the repo, about 90 seconds. It shows the real extension in a real Chromium window, recorded with `scripts/record-demo.mjs`:
 1. Turning haunting on.
-2. Tabs decaying in the tab strip.
-3. The possession and page effects.
-4. The popup tab manager.
-5. Burying a tab and resurrecting it.
-6. Exorcise.
+2. Tabs decaying in the tab strip. This part is four real minutes on the 30-second demo threshold, sped up on screen.
+3. The possession, with a slow-motion replay.
+4. The decayed page and its cobwebs being swept.
+5. The popup tab manager.
+6. Burying two tabs and resurrecting one from the Graveyard.
+7. Exorcise.
 
 The form wants a YouTube, Vimeo or Loom link, so the file still needs uploading to one of them.
 
 ## Screenshot for the submission card
 
-`docs/screenshot.png`, a frame from the demo.
+`docs/screenshot.png`: the Graveyard with two real burials, the live tab strip above it. A frame from the demo recording.
 
 ## Before submitting
 

@@ -4,7 +4,7 @@ A haunted tab manager browser extension. It manages your real tabs, and neglecte
 
 Solo entry for [Hackyard Yard #5: Haunted](https://hackyard.tech/yards/yard-5).
 
-**Demo video:** [`docs/demo.mp4`](docs/demo.mp4), about 80 seconds of the real extension in Chromium.
+**Demo video:** [`docs/demo.mp4`](docs/demo.mp4), about 90 seconds of the real extension in Chromium.
 
 - `SPEC.md` describes what is being built.
 - `HACKYARD.md` lists the rules, dates, and the submission checklist.
