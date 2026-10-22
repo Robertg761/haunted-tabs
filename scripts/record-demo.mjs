@@ -211,39 +211,39 @@ async function record() {
     // 3. Come back to a dead tab: it possesses the screen, then the page itself has decayed.
     mark('possess');
     await news.bringToFront();
-    await sleep(9500);
+    await sleep(11000); // the glitch, then webs, dust, fog, eyes and drips settle in
     mark('sweep');
     for (let i = 0; i < 3; i++) {
-      await news.mouse.move(140, 220, { steps: 25 });
-      await news.mouse.move(1150, 560, { steps: 35 });
-      await news.mouse.move(250, 600, { steps: 25 });
+      await news.mouse.move(120, 200, { steps: 45 });
+      await news.mouse.move(1180, 580, { steps: 60 });
+      await news.mouse.move(220, 620, { steps: 45 });
     }
     await news.mouse.wheel(0, 500);
-    await sleep(2500);
+    await sleep(3000);
     mark('popup');
 
     // 4. The popup is a real tab manager.
     popup = await openPopup();
     await sleep(2600);
-    await popup.type('#search', 'soup', { delay: 160 });
-    await sleep(1600);
-    await popup.click('#search-clear');
-    await sleep(1400);
+    await sleep(1500);
 
-    // 5. Bury a tab, then bring it back from the Graveyard.
+    // 5. Bury two tabs, then bring one back from the Graveyard.
     mark('bury');
-    const rowId = await popup.evaluate(() => [...document.querySelectorAll('#list [data-id]')].find((r) => r.textContent.includes('pumpkin'))?.dataset.id);
-    await popup.hover(`#list [data-id="${rowId}"]`);
-    await sleep(600);
-    await popup.click(`#list [data-id="${rowId}"] [data-action="bury"]`);
-    await sleep(2400);
+    for (const words of ['pumpkin', 'Lighthouse']) {
+      const rowId = await popup.evaluate((w) => [...document.querySelectorAll('#list [data-id]')].find((r) => r.textContent.includes(w))?.dataset.id, words);
+      await popup.hover(`#list [data-id="${rowId}"]`);
+      await sleep(600);
+      await popup.click(`#list [data-id="${rowId}"] [data-action="bury"]`);
+      await sleep(2200);
+    }
     const graveyardOpened = context.waitForEvent('page', (p) => p.url().includes('/graveyard/'));
     await popup.click('#graveyard');
     const graveyard = await graveyardOpened;
     await graveyard.waitForLoadState('domcontentloaded');
-    await sleep(3200);
-    await graveyard.locator('.stone [data-action="resurrect"]').first().click();
-    await sleep(3500);
+    mark('graveyard');
+    await sleep(6000);
+    await graveyard.locator('.stone', { hasText: 'pumpkin' }).locator('[data-action="resurrect"]').click();
+    await sleep(5000);
 
     // 6. Exorcise: every title, favicon and page goes back to normal.
     mark('exorcise');
@@ -309,7 +309,7 @@ async function edit(m) {
 
   // The four-minute wait, sped up to about 20 seconds, labelled with the stage the news tab is in.
   const decayEnd = m.possess;
-  const speed = (decayEnd - m.decay) / 20;
+  const speed = (decayEnd - m.decay) / 18;
   const at = (t) => ((t - m.decay) / speed).toFixed(2);
   const stages = [
     ['withering', 'Withering: the title rots, the favicon cracks'],
@@ -327,12 +327,15 @@ async function edit(m) {
     caption(`Leave tabs alone and they decay in the tab strip (${Math.round(decayEnd - m.decay)} s, sped up ${speed.toFixed(0)}×)`),
     ...labels.filter(Boolean),
   ]);
-  await clip(m.possess - 0.2, m.sweep, 1, [caption('Return to a dead tab and it possesses your screen. Then the page has decayed too.')]);
+  await clip(m.possess - 0.2, m.possess + 2.6, 1, [caption('Return to a dead tab and it possesses your screen')]);
+  await clip(m.possess - 0.1, m.possess + 2.2, 0.4, [caption('Again, at 0.4× speed')]);
+  await clip(m.possess + 2.6, m.sweep, 1, [caption('Then the page itself has decayed: cobwebs, dust, fog, eyes and drips')]);
   await clip(m.sweep, m.popup, 1, [caption('Sweep the mouse: cobwebs tear and the fog wipes clear')]);
   await clip(m.popup, m.bury, 1, [caption('The popup is a real tab manager: every tab, how long it sat, how far it has rotted')]);
-  await clip(m.bury, m.exorcise, 1, [caption('Bury a tab, then resurrect it from the Graveyard')]);
+  await clip(m.bury, m.graveyard, 1, [caption('Bury tabs from the popup. Nothing is lost.')]);
+  await clip(m.graveyard, m.exorcise, 1, [caption('They wait in the Graveyard, and one click resurrects them')]);
   await clip(m.exorcise, m.end, 1, [caption('Exorcise: every title, favicon and page goes back to normal')]);
-  await card(5, [
+  await card(4, [
     ['Haunted Tabs', 'h/2-110', 84],
     ['Opt-in · reversible · never deletes data · no network', 'h/2+10', 40],
     ['Chrome, Edge, Brave · Firefox and Zen', 'h/2+80', 34],
@@ -342,6 +345,9 @@ async function edit(m) {
   writeFileSync(list, parts.map((p) => `file '${p}'`).join('\n'));
   await ffmpeg(['-f', 'concat', '-safe', '0', '-i', list, '-c:v', 'libx264', '-preset', 'slow', '-crf', '28', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-an', OUT]);
   console.log(`wrote ${OUT}`);
+  // The submission card: the Graveyard with both buried tabs, before the resurrection.
+  await ffmpeg(['-ss', String(m.graveyard + 4.5), '-i', join(WORK, 'raw.mkv'), '-frames:v', '1', resolve('docs/screenshot.png')]);
+  console.log(`wrote ${resolve('docs/screenshot.png')}`);
 }
 
 const marks = editOnly ? JSON.parse(readFileSync(join(WORK, 'marks.json'), 'utf8')) : await record();
