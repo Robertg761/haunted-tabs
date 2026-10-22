@@ -4,6 +4,8 @@ A haunted tab manager browser extension. It manages your real tabs, and neglecte
 
 Solo entry for [Hackyard Yard #5: Haunted](https://hackyard.tech/yards/yard-5).
 
+**Demo video:** [`docs/demo.mp4`](docs/demo.mp4), about 80 seconds of the real extension in Chromium.
+
 - `SPEC.md` describes what is being built.
 - `HACKYARD.md` lists the rules, dates, and the submission checklist.
 - `AGENTS.md` has instructions for AI coding agents.
@@ -120,6 +122,8 @@ npm run lint:firefox  # Mozilla's add-on linter on dist/firefox
 npm run test:popup  # smoke test of the popup UI
 npm run test:content  # the in-page script: paint, unsaved input, overlay stacking
 ```
+
+To re-record the demo video (needs Xvfb and ffmpeg), build and then run `node scripts/record-demo.mjs`. It drives the real extension in a visible Chromium on a virtual display, films it, and writes `docs/demo.mp4`.
 
 To look at one effect on a realistic page, build and then run the effect harness. It saves screenshots over time, reports the frame rate and console errors, and with `--stop` checks that nothing is left behind:
 
